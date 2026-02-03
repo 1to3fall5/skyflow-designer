@@ -1,0 +1,5 @@
+{
+  "name": "SkyFlow Designer",
+  "description": "A professional tool to generate sky textures using Gemini AI, paint directional flowmaps in real-time, and preview the animated result in 3D. Essential for creating dynamic skyboxes for game engines.",
+  "requestFramePermissions": []
+}
