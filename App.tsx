@@ -44,7 +44,11 @@ const App: React.FC = () => {
   const [flowVersion, setFlowVersion] = useState(0);
 
   // Export Settings
-  const [invertExport, setInvertExport] = useState(false);
+  // Based on user feedback: "invertX=true" was 180 degrees off.
+  // Current state (-x, y) rotated 180 deg is (x, -y).
+  // So we default to invertX=false, invertY=true.
+  const [invertX, setInvertX] = useState(false);
+  const [invertY, setInvertY] = useState(true);
 
   const [skyTextureUrl, setSkyTextureUrl] = useState<string | null>(null);
   const [flowCanvas, setFlowCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -101,15 +105,15 @@ const App: React.FC = () => {
     // Draw the current flow map
     ctx.drawImage(flowCanvas, 0, 0);
 
-    if (invertExport) {
+    if (invertX || invertY) {
         const imageData = ctx.getImageData(0, 0, exportCanvas.width, exportCanvas.height);
         const data = imageData.data;
         
-        // Invert R and G channels (Flow vectors)
+        // Invert channels based on settings
         // 0 -> 255, 255 -> 0, 128 -> 127
         for (let i = 0; i < data.length; i += 4) {
-            data[i] = 255 - data[i];     // R (U)
-            data[i + 1] = 255 - data[i + 1]; // G (V)
+            if (invertX) data[i] = 255 - data[i];     // R (U)
+            if (invertY) data[i + 1] = 255 - data[i + 1]; // G (V)
             // B and A remain untouched
         }
         
@@ -117,7 +121,7 @@ const App: React.FC = () => {
     }
 
     const link = document.createElement('a');
-    link.download = invertExport ? 'flowmap_inverted.png' : 'flowmap.png';
+    link.download = `flowmap_x${invertX?'inv':''}_y${invertY?'inv':''}.png`;
     link.href = exportCanvas.toDataURL('image/png');
     link.click();
   };
@@ -210,19 +214,32 @@ const App: React.FC = () => {
           
           <div className="h-6 w-px bg-slate-700 mx-2"></div>
 
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer hover:text-white transition-colors">
-              <input 
-                type="checkbox" 
-                checked={invertExport}
-                onChange={(e) => setInvertExport(e.target.checked)}
-                className="w-4 h-4 rounded bg-slate-700 border-slate-600 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-slate-800"
-              />
-              <span title="反转流动方向（R 和 G 通道），用于需要相反向量的引擎">反转</span>
-            </label>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 bg-slate-700/50 px-3 py-1.5 rounded-lg border border-slate-600">
+              <span className="text-xs text-slate-400 font-medium">导出设置:</span>
+              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer hover:text-white transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={invertX}
+                  onChange={(e) => setInvertX(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded bg-slate-600 border-slate-500 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-800"
+                />
+                <span title="反转红色通道 (X轴)">反转X</span>
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer hover:text-white transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={invertY}
+                  onChange={(e) => setInvertY(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded bg-slate-600 border-slate-500 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-800"
+                />
+                <span title="反转绿色通道 (Y轴)">反转Y</span>
+              </label>
+            </div>
+
             <button 
               onClick={handleExport}
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium transition-colors"
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-lg shadow-indigo-500/20"
             >
               <Download className="w-4 h-4" />
               导出贴图
