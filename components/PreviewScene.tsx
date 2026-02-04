@@ -38,6 +38,7 @@ interface SceneContentProps {
   activeTool: ActiveTool;
   flowVersion: number;
   onPaint: (u: number, v: number, lu: number, lv: number) => void;
+  onPaintEnd?: () => void;
   projectionType: ProjectionType;
   polarAngle: number;
   showFlowMap: boolean;
@@ -53,6 +54,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
   activeTool,
   flowVersion,
   onPaint,
+  onPaintEnd,
   projectionType,
   polarAngle,
   showFlowMap
@@ -215,11 +217,17 @@ const SceneContent: React.FC<SceneContentProps> = ({
   };
 
   const handlePointerUp = (e: ThreeEvent<PointerEvent>) => {
+    if (isDragging.current) {
+        if (onPaintEnd) onPaintEnd();
+    }
     isDragging.current = false;
     lastTransformedUV.current = null;
   };
   
   const handlePointerLeave = (e: ThreeEvent<PointerEvent>) => {
+    if (isDragging.current) {
+        if (onPaintEnd) onPaintEnd();
+    }
     isDragging.current = false;
     lastTransformedUV.current = null;
     setShowCursor(false);

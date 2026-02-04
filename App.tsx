@@ -11,7 +11,8 @@ import {
   Globe,
   Columns,
   Layers,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Wand2
 } from 'lucide-react';
 import FlowPainter from './components/FlowPainter';
 import PreviewScene from './components/PreviewScene';
@@ -38,7 +39,19 @@ const App: React.FC = () => {
   const [windDirection, setWindDirection] = useState(45); // Default 45 to show movement
   const [windTrigger, setWindTrigger] = useState(0);
   const [resetTrigger, setResetTrigger] = useState(0);
-  const [blurAmount, setBlurAmount] = useState(0);
+  
+  // Layer Settings
+  const [globalBlur, setGlobalBlur] = useState(0);
+  const [obstacleBlur, setObstacleBlur] = useState(0);
+  const [brushBlur, setBrushBlur] = useState(0);
+  
+  // Layer Visibility
+  const [globalLayerVisible, setGlobalLayerVisible] = useState(true);
+  const [obstacleLayerVisible, setObstacleLayerVisible] = useState(true);
+  
+  // Magic Wand Settings
+  const [magicWandThreshold, setMagicWandThreshold] = useState(20);
+  const [showMaskOverlay, setShowMaskOverlay] = useState(false);
   
   // Versioning to force texture updates when canvas ref doesn't change but content does
   const [flowVersion, setFlowVersion] = useState(0);
@@ -59,12 +72,6 @@ const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const flowPainterRef = useRef<FlowPainterHandle>(null);
 
-  const handleApplyWind = () => {
-      if (confirm("这将覆盖您当前绘制的流动。是否继续？")) {
-          setWindTrigger(prev => prev + 1);
-      }
-  };
-
   const handleResetCanvas = () => {
       if (confirm("清空绘制的流动层？")) {
           setResetTrigger(prev => prev + 1);
@@ -79,7 +86,17 @@ const App: React.FC = () => {
   // Bridge for 3D painting to use the FlowPainter logic
   const handle3DPaint = useCallback((u: number, v: number, lu: number, lv: number) => {
     if (flowPainterRef.current) {
-      flowPainterRef.current.stroke(u, v, lu, lv);
+      if (activeTool === 'magic_wand') {
+         flowPainterRef.current.floodFill(u, v, magicWandThreshold);
+      } else {
+         flowPainterRef.current.stroke(u, v, lu, lv);
+      }
+    }
+  }, [activeTool, magicWandThreshold]);
+
+  const handle3DPaintEnd = useCallback(() => {
+    if (flowPainterRef.current) {
+        flowPainterRef.current.saveHistory();
     }
   }, []);
 
@@ -151,7 +168,34 @@ const App: React.FC = () => {
 
       const key = e.key.toLowerCase();
 
+      // Undo/Redo
+      if ((e.ctrlKey || e.metaKey) && key === 'z') {
+        e.preventDefault();
+        console.log('[App] Undo/Redo triggered');
+        if (e.shiftKey) {
+          flowPainterRef.current?.redo();
+        } else {
+          flowPainterRef.current?.undo();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'y') {
+        e.preventDefault();
+        console.log('[App] Redo triggered (Ctrl+Y)');
+        flowPainterRef.current?.redo();
+        return;
+      }
+
       switch (key) {
+        case '1':
+            setViewMode('2d');
+            break;
+        case '2':
+            setViewMode('split');
+            break;
+        case '3':
+            setViewMode('3d');
+            break;
         case 'b': // Brush
           setActiveTool('brush');
           setBrushSettings(prev => ({ ...prev, isEraser: false }));
@@ -312,14 +356,123 @@ const App: React.FC = () => {
 
           <hr className="border-slate-700" />
           
-          {/* Section: Global Flow Operations */}
+          {/* Section: Layer 3 - Free Brush (Moved to Top) */}
           <section className="space-y-3">
-             <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-              <Compass className="w-4 h-4" /> 流动操作
-            </h2>
+             <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                    <Palette className="w-4 h-4" /> 自由笔刷
+                </h2>
+             </div>
+            
+            <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setActiveTool('brush');
+                      setBrushSettings(p => ({ ...p, isEraser: false }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border ${activeTool === 'brush' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                    title="Shortcut: B"
+                  >
+                    画笔 <span className="text-xs opacity-50 ml-1">(B)</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTool('eraser');
+                      setBrushSettings(p => ({ ...p, isEraser: true }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'eraser' ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                    title="Shortcut: E"
+                  >
+                    <Eraser className="w-3 h-3" /> <span className="text-xs opacity-50 ml-1">(E)</span>
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>画笔大小</span>
+                      <span>{brushSettings.size}px</span>
+                    </div>
+                    <input 
+                      type="range" min="1" max="100" 
+                      value={brushSettings.size}
+                      onChange={(e) => setBrushSettings({...brushSettings, size: Number(e.target.value)})}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>硬度</span>
+                      <span>{Math.round(brushSettings.hardness * 100)}%</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="1" step="0.05"
+                      value={brushSettings.hardness}
+                      onChange={(e) => setBrushSettings({...brushSettings, hardness: Number(e.target.value)})}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+                  
+                  <div>
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>流动强度</span>
+                      <span>{Math.round(brushSettings.strength * 100)}%</span>
+                    </div>
+                    <input 
+                      type="range" min="0.1" max="1" step="0.1"
+                      value={brushSettings.strength}
+                      onChange={(e) => setBrushSettings({...brushSettings, strength: Number(e.target.value)})}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+
+                   <div className="space-y-2 pt-2 border-t border-slate-700/50">
+                        <div className="flex justify-between text-xs text-slate-400 mb-1">
+                          <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 笔刷层模糊</span>
+                          <span>{brushBlur}px</span>
+                        </div>
+                        <input 
+                          type="range" min="0" max="32"
+                          value={brushBlur}
+                          onChange={(e) => setBrushBlur(Number(e.target.value))}
+                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
+                    </div>
+                </div>
+
+                <div className="pt-2">
+                    <button 
+                        onClick={handleResetCanvas}
+                        className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-1.5 rounded text-xs font-medium transition-colors"
+                    >
+                        清空所有图层
+                    </button>
+                </div>
+            </div>
+          </section>
+
+          <hr className="border-slate-700" />
+          
+          {/* Section: Layer 1 - Global Flow */}
+          <section className="space-y-3">
+             <div className="flex items-center justify-between">
+               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <Compass className="w-4 h-4" /> 全局方向
+               </h2>
+               <button 
+                 onClick={() => setGlobalLayerVisible(!globalLayerVisible)}
+                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${globalLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                 title={globalLayerVisible ? "隐藏图层" : "显示图层"}
+               >
+                 <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${globalLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
+               </button>
+             </div>
+            {globalLayerVisible && (
             <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
                 <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>全局方向</span>
+                  <span>方向角度</span>
                   <span>{windDirection}°</span>
                 </div>
                 <div className="flex gap-2 items-center">
@@ -331,165 +484,113 @@ const App: React.FC = () => {
                     />
                 </div>
                 
-                <button 
-                    onClick={handleApplyWind}
-                    className="w-full bg-teal-700 hover:bg-teal-600 text-teal-100 py-2 rounded text-xs font-medium transition-colors mb-2"
-                >
-                    应用全局风向
-                </button>
-
                 <div className="space-y-2">
                     <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 全局模糊（非破坏性）</span>
-                      <span>{blurAmount}px</span>
+                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 全局模糊</span>
+                      <span>{globalBlur}px</span>
                     </div>
                     <input 
                       type="range" min="0" max="32"
-                      value={blurAmount}
-                      onChange={(e) => setBlurAmount(Number(e.target.value))}
+                      value={globalBlur}
+                      onChange={(e) => setGlobalBlur(Number(e.target.value))}
                       className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                     />
                 </div>
-
-                <div className="pt-2">
-                    <button 
-                        onClick={handleResetCanvas}
-                        className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-1.5 rounded text-xs font-medium transition-colors"
-                    >
-                        清空贴图
-                    </button>
-                </div>
             </div>
+            )}
           </section>
 
           <hr className="border-slate-700" />
 
-          {/* Section: Paint Tools */}
-          <section className="space-y-4">
+          {/* Section: Layer 2 - Obstacles */}
+          <section className="space-y-3">
              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <Palette className="w-4 h-4" /> 绘制工具
-                </h2>
+               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <Eraser className="w-4 h-4" /> 障碍物 (遮罩)
+               </h2>
+               <button 
+                 onClick={() => setObstacleLayerVisible(!obstacleLayerVisible)}
+                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${obstacleLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                 title={obstacleLayerVisible ? "隐藏图层" : "显示图层"}
+               >
+                 <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${obstacleLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
+               </button>
              </div>
-            
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-slate-400">参考图叠加</span>
-              <button 
-                onClick={() => setShowReference(!showReference)}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${showReference ? 'bg-indigo-600' : 'bg-slate-700'}`}
-              >
-                <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${showReference ? 'translate-x-5' : 'translate-x-1'}`} />
-              </button>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setActiveTool('brush');
-                  setBrushSettings(p => ({ ...p, isEraser: false }));
-                }}
-                className={`flex-1 py-2 text-sm rounded-md border ${activeTool === 'brush' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                title="Shortcut: B"
-              >
-                画笔 <span className="text-xs opacity-50 ml-1">(B)</span>
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTool('eraser');
-                  setBrushSettings(p => ({ ...p, isEraser: true }));
-                }}
-                className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'eraser' ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                title="Shortcut: E"
-              >
-                <Eraser className="w-3 h-3" /> <span className="text-xs opacity-50 ml-1">(E)</span>
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>画笔大小</span>
-                  <span>{brushSettings.size}px</span>
+            {obstacleLayerVisible && (
+            <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setActiveTool('obstacle');
+                      setBrushSettings(p => ({ ...p, isEraser: false }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                  >
+                     绘制障碍
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTool('obstacle_eraser');
+                      setBrushSettings(p => ({ ...p, isEraser: true }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle_eraser' ? 'bg-amber-800 border-amber-700 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                  >
+                     擦除障碍
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTool('magic_wand');
+                      setBrushSettings(p => ({ ...p, isEraser: false }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'magic_wand' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                    title="魔棒工具 (快速选择障碍物)"
+                  >
+                     <Wand2 className="w-3 h-3" />
+                  </button>
                 </div>
-                <input 
-                  type="range" min="1" max="100" 
-                  value={brushSettings.size}
-                  onChange={(e) => setBrushSettings({...brushSettings, size: Number(e.target.value)})}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                />
-              </div>
 
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>硬度</span>
-                  <span>{Math.round(brushSettings.hardness * 100)}%</span>
+                {activeTool === 'magic_wand' && (
+                  <div className="space-y-2 pt-1 border-t border-slate-700/50">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>魔棒容差</span>
+                      <span>{magicWandThreshold}</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="100"
+                      value={magicWandThreshold}
+                      onChange={(e) => setMagicWandThreshold(Number(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-1">
+                   <span className="text-xs text-slate-400">显示红色遮罩</span>
+                   <button 
+                     onClick={() => {
+                       console.log('[App] Toggling Red Mask to:', !showMaskOverlay);
+                       setShowMaskOverlay(!showMaskOverlay);
+                     }}
+                     className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${showMaskOverlay ? 'bg-red-600' : 'bg-slate-700'}`}
+                   >
+                     <span className={`inline-block h-2 w-2 transform rounded-full bg-white transition-transform ${showMaskOverlay ? 'translate-x-4' : 'translate-x-1'}`} />
+                   </button>
                 </div>
-                <input 
-                  type="range" min="0" max="1" step="0.05"
-                  value={brushSettings.hardness}
-                  onChange={(e) => setBrushSettings({...brushSettings, hardness: Number(e.target.value)})}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                />
-              </div>
-              
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>流动强度</span>
-                  <span>{Math.round(brushSettings.strength * 100)}%</span>
+
+                <div className="space-y-2">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 障碍物边缘模糊</span>
+                      <span>{obstacleBlur}px</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="32"
+                      value={obstacleBlur}
+                      onChange={(e) => setObstacleBlur(Number(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
                 </div>
-                <input 
-                  type="range" min="0.1" max="1" step="0.1"
-                  value={brushSettings.strength}
-                  onChange={(e) => setBrushSettings({...brushSettings, strength: Number(e.target.value)})}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                />
-              </div>
             </div>
-          </section>
-
-          <hr className="border-slate-700" />
-
-          {/* Section: Preview Settings */}
-          <section className="space-y-4">
-             <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-              <Eye className="w-4 h-4" /> 预览设置
-            </h2>
-            <div className="space-y-3">
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>动画速度</span>
-                  <span>{previewSpeed.toFixed(2)}</span>
-                </div>
-                <input 
-                  type="range" min="0" max="2" step="0.05"
-                  value={previewSpeed}
-                  onChange={(e) => setPreviewSpeed(Number(e.target.value))}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500"
-                />
-              </div>
-              <div>
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>扭曲程度</span>
-                  <span>{previewDistortion.toFixed(2)}</span>
-                </div>
-                <input 
-                  type="range" min="0" max="0.5" step="0.01"
-                  value={previewDistortion}
-                  onChange={(e) => setPreviewDistortion(Number(e.target.value))}
-                  className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-sky-500"
-                />
-              </div>
-
-            </div>
-            
-            <div className="bg-slate-900/50 p-3 rounded text-xs text-slate-400 leading-relaxed border border-slate-700">
-              <strong className="text-slate-300">快捷键：</strong>
-              <ul className="mt-1 space-y-1">
-                <li><span className="text-sky-400 font-bold">B</span> - 画笔模式</li>
-                <li><span className="text-sky-400 font-bold">E</span> - 橡皮擦模式</li>
-                <li><span className="text-sky-400 font-bold">V</span> - 切换箭头显示</li>
-              </ul>
-            </div>
+            )}
           </section>
         </aside>
 
@@ -506,12 +607,19 @@ const App: React.FC = () => {
               ref={flowPainterRef}
               activeTool={activeTool}
               brushSettings={brushSettings} 
-              bgImageUrl={showReference ? skyTextureUrl : null} 
+              bgImageUrl={skyTextureUrl} 
+              showReference={showReference}
               onTextureUpdate={handleTextureUpdate}
               windDirection={windDirection}
               windTrigger={windTrigger}
               resetTrigger={resetTrigger}
-              blurAmount={blurAmount}
+              globalBlur={globalBlur}
+              obstacleBlur={obstacleBlur}
+              brushBlur={brushBlur}
+              globalLayerVisible={globalLayerVisible}
+              obstacleLayerVisible={obstacleLayerVisible}
+              magicWandThreshold={magicWandThreshold}
+              showMaskOverlay={showMaskOverlay}
               onPaintingComplete={handlePaintingComplete}
               projectionType={projectionType}
               polarAngle={polarAngle}
@@ -526,24 +634,80 @@ const App: React.FC = () => {
             `}
           >
             {/* 3D Toolbar Overlay */}
-            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-10 flex gap-2">
-               <div className="flex bg-slate-800/90 backdrop-blur rounded-full p-1 border border-slate-700 shadow-xl">
+            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-10 flex flex-row items-center gap-3">
+               {/* Buttons */}
+               <div className="flex bg-slate-900/60 backdrop-blur-md p-2 rounded-xl border border-white/10 shadow-xl h-12 items-center">
                 <button 
                     onClick={() => setShowArrows(!showArrows)}
-                    className={`p-2 rounded-full transition-colors ${showArrows ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+                    className={`p-2 rounded-lg transition-colors ${showArrows ? 'bg-indigo-500/80 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
                     title={showArrows ? '隐藏箭头' : '显示箭头'}
                 >
                   <ArrowRightLeft className="w-4 h-4" />
                 </button>
-                <div className="w-px bg-slate-700 my-1 mx-1"></div>
+                <div className="w-px h-6 bg-white/10 mx-2"></div>
                 <button 
                     onClick={() => setShowFlowMap(!showFlowMap)}
-                    className={`p-2 rounded-full transition-colors ${showFlowMap ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}
+                    className={`p-2 rounded-lg transition-colors ${showFlowMap ? 'bg-indigo-500/80 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
                     title={showFlowMap ? '隐藏流动贴图' : '显示流动贴图'}
                 >
                   <Layers className="w-4 h-4" />
                 </button>
                </div>
+
+               {/* Preview Settings Sliders */}
+               <div className="flex flex-row items-center bg-slate-900/60 backdrop-blur-md p-2 rounded-xl border border-white/10 shadow-2xl transition-all duration-300 h-12">
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">动画速度</span>
+                        <input 
+                        type="range" min="0" max="2" step="0.05"
+                        value={previewSpeed}
+                        onChange={(e) => setPreviewSpeed(Number(e.target.value))}
+                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        />
+                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{previewSpeed.toFixed(2)}</span>
+                    </div>
+                    
+                    <div className="w-px h-4 bg-white/10"></div>
+                    
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">扭曲程度</span>
+                        <input 
+                        type="range" min="0" max="0.5" step="0.01"
+                        value={previewDistortion}
+                        onChange={(e) => setPreviewDistortion(Number(e.target.value))}
+                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        />
+                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{previewDistortion.toFixed(2)}</span>
+                    </div>
+                  </div>
+               </div>
+            </div>
+
+            {/* Controls Help Overlay */}
+            <div className="absolute top-4 left-4 z-10 bg-slate-800/60 backdrop-blur-sm p-3 rounded-lg border border-slate-700/50 shadow-xl text-xs text-slate-300 pointer-events-none select-none">
+              <div className="space-y-3">
+                <div>
+                  <strong className="text-slate-400 block mb-1">快捷键</strong>
+                  <ul className="space-y-1 text-slate-400">
+                    <li className="flex items-center justify-between gap-4"><span>画笔模式</span> <span className="text-sky-400 font-bold bg-slate-700/50 px-1.5 rounded">B</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>橡皮擦</span> <span className="text-rose-400 font-bold bg-slate-700/50 px-1.5 rounded">E</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>显示箭头</span> <span className="text-indigo-400 font-bold bg-slate-700/50 px-1.5 rounded">V</span></li>
+                    <li className="flex items-center justify-between gap-4 pt-1 border-t border-slate-700/30 mt-1"><span>2D视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">1</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>分屏视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">2</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>3D视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">3</span></li>
+                  </ul>
+                </div>
+                <div className="h-px bg-slate-700/50"></div>
+                <div>
+                  <strong className="text-slate-400 block mb-1">鼠标操作</strong>
+                  <ul className="space-y-1 text-slate-400">
+                    <li className="flex items-center justify-between gap-4"><span>绘制</span> <span className="text-slate-200">左键拖拽</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>旋转视图</span> <span className="text-slate-200">中键拖拽</span></li>
+                    <li className="flex items-center justify-between gap-4"><span>缩放</span> <span className="text-slate-200">滚轮</span></li>
+                  </ul>
+                </div>
+              </div>
             </div>
 
             <PreviewScene 
@@ -556,6 +720,7 @@ const App: React.FC = () => {
               activeTool={activeTool}
               flowVersion={flowVersion}
               onPaint={handle3DPaint}
+              onPaintEnd={handle3DPaintEnd}
               projectionType={projectionType}
               polarAngle={polarAngle}
               showFlowMap={showFlowMap}
