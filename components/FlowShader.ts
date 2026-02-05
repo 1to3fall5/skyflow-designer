@@ -51,7 +51,7 @@ export const FlowShaderMaterial = {
 
     // Convert Sphere UV (Equirectangular) to Sampling UV (Polar or Equirectangular)
     vec2 getSamplingUV(vec2 sphereUV) {
-        if (uProjectionType > 0.5) {
+        if (abs(uProjectionType - 1.0) < 0.1) {
             // Polar / Fisheye Mapping
             // Sphere UV: v=1 is Zenith (Center)
             // Phi goes from 0 (Zenith) to PI (Nadir)
@@ -69,7 +69,7 @@ export const FlowShaderMaterial = {
             
             return vec2(0.5 + x, 0.5 + y);
         } else {
-            // Equirectangular (Default)
+            // Equirectangular (0.0) or Planar (2.0)
             return sphereUV;
         }
     }
@@ -104,7 +104,7 @@ export const FlowShaderMaterial = {
       vec4 finalColor = mix(col1, col2, mixFactor);
       
       // Masking for Polar: Black out everything outside the valid radius
-      if (uProjectionType > 0.5) {
+      if (abs(uProjectionType - 1.0) < 0.1) {
           float dist = distance(baseUV, vec2(0.5));
           if (dist > 0.5) finalColor = vec4(0.0, 0.0, 0.0, 1.0);
       }
@@ -170,7 +170,7 @@ export const ArrowShaderMaterial = {
     
     // Copy of helper (could be shared, but inlined for simplicity)
     vec2 getSamplingUV(vec2 sphereUV) {
-        if (uProjectionType > 0.5) {
+        if (abs(uProjectionType - 1.0) < 0.1) {
             float phi = (1.0 - sphereUV.y) * 3.14159265;
             float theta = sphereUV.x * 2.0 * 3.14159265;
             // r = (phi / uPolarAngle) * 0.5
@@ -196,7 +196,7 @@ export const ArrowShaderMaterial = {
       vec2 texUV = getSamplingUV(cellCenterSphereUV);
       
       // Check mask
-      if (uProjectionType > 0.5 && distance(texUV, vec2(0.5)) > 0.5) discard;
+      if (abs(uProjectionType - 1.0) < 0.1 && distance(texUV, vec2(0.5)) > 0.5) discard;
       
       vec4 flowVal = texture2D(uFlowMap, texUV);
       
@@ -211,7 +211,7 @@ export const ArrowShaderMaterial = {
       
       vec2 visualDir = -flow; // Initial visual direction in Texture Space
       
-      if (uProjectionType > 0.5) {
+      if (abs(uProjectionType - 1.0) < 0.1) {
           // Rotate from Texture Space to Sphere Surface Space
           // Theta is Longitude angle.
           // sphereUV.x is 0..1, maps to 0..2PI.

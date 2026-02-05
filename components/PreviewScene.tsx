@@ -1,6 +1,6 @@
 import React, { useRef, useMemo, useEffect, useState } from 'react';
 import { Canvas, useFrame, useThree, ThreeEvent } from '@react-three/fiber';
-import { OrbitControls, Sphere } from '@react-three/drei';
+import { OrbitControls, Sphere, Plane, GizmoHelper, GizmoViewport } from '@react-three/drei';
 import * as THREE from 'three';
 import { FlowShaderMaterial, ArrowShaderMaterial } from './FlowShader';
 import { BrushSettings, ActiveTool, ProjectionType } from '../types';
@@ -42,6 +42,7 @@ interface SceneContentProps {
   projectionType: ProjectionType;
   polarAngle: number;
   showFlowMap: boolean;
+  arrowDensity: number;
 }
 
 const SceneContent: React.FC<SceneContentProps> = ({ 
@@ -57,7 +58,8 @@ const SceneContent: React.FC<SceneContentProps> = ({
   onPaintEnd,
   projectionType,
   polarAngle,
-  showFlowMap
+  showFlowMap,
+  arrowDensity
 }) => {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   const arrowMaterialRef = useRef<THREE.ShaderMaterial>(null);
@@ -77,6 +79,9 @@ const SceneContent: React.FC<SceneContentProps> = ({
   // Cursor State
   const cursorUV = useRef<THREE.Vector2>(new THREE.Vector2(0, 0));
   const [showCursor, setShowCursor] = useState(false);
+  
+  // Plane Aspect Ratio
+  const [planeAspect, setPlaneAspect] = useState(2.0);
 
   // Helper to transform Sphere UVs to Texture UVs based on projection
   const getTransformedUV = (sphereUV: THREE.Vector2): THREE.Vector2 => {
@@ -129,7 +134,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
       materialRef.current.uniforms.uCursor.value.copy(cursorUV.current);
       materialRef.current.uniforms.uBrushSize.value = uvRadius;
       materialRef.current.uniforms.uShowCursor.value = showCursor ? 1.0 : 0.0;
-      materialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : 0.0;
+      materialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : (projectionType === 'planar' ? 2.0 : 0.0);
       materialRef.current.uniforms.uPolarAngle.value = THREE.MathUtils.degToRad(polarAngle);
       materialRef.current.uniforms.uShowFlowMap.value = showFlowMap ? 1.0 : 0.0;
       materialRef.current.uniformsNeedUpdate = true;
@@ -138,8 +143,16 @@ const SceneContent: React.FC<SceneContentProps> = ({
       if (materialRef.current?.uniforms.uFlowMap.value.needsUpdate) {
         arrowMaterialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
       }
-      arrowMaterialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : 0.0;
+      arrowMaterialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : (projectionType === 'planar' ? 2.0 : 0.0);
       arrowMaterialRef.current.uniforms.uPolarAngle.value = THREE.MathUtils.degToRad(polarAngle);
+      
+      // Update Grid Size based on density
+      // For Planar: X = density, Y = density / aspect
+      // For Sphere: X = density, Y = density / 2
+      const x = arrowDensity;
+      const y = projectionType === 'planar' ? Math.round(x / planeAspect) : Math.round(x / 2);
+      arrowMaterialRef.current.uniforms.uGridSize.value.set(x, y);
+
       arrowMaterialRef.current.uniformsNeedUpdate = true;
     }
   });
@@ -159,6 +172,9 @@ const SceneContent: React.FC<SceneContentProps> = ({
               tex.minFilter = THREE.LinearFilter;
               tex.magFilter = THREE.LinearFilter;
               tex.needsUpdate = true;
+              if (tex.image) {
+                  setPlaneAspect(tex.image.width / tex.image.height);
+              }
               if (materialRef.current) {
                 materialRef.current.uniforms.uTexture.value = tex;
                 materialRef.current.uniformsNeedUpdate = true;
@@ -167,11 +183,22 @@ const SceneContent: React.FC<SceneContentProps> = ({
         );
     } else {
          const canvas = document.createElement('canvas');
-         canvas.width = 64; canvas.height = 64;
+         canvas.width = 512; canvas.height = 256;
+         setPlaneAspect(2.0);
          const ctx = canvas.getContext('2d');
          if (ctx) {
-            ctx.fillStyle = '#444'; ctx.fillRect(0,0,64,64);
-            ctx.fillStyle = '#666'; ctx.fillRect(0,0,32,32); ctx.fillRect(32,32,32,32);
+            ctx.fillStyle = '#444'; 
+            ctx.fillRect(0, 0, 512, 256);
+            ctx.fillStyle = '#666'; 
+            const gridSize = 16; // Size of each square
+             for (let y = 0; y < 256; y += gridSize) {
+                 for (let x = 0; x < 512; x += gridSize) {
+                    // Checkerboard pattern
+                    if ((x / gridSize + y / gridSize) % 2 === 0) {
+                        ctx.fillRect(x, y, gridSize, gridSize);
+                    }
+                }
+            }
          }
          const t = new THREE.CanvasTexture(canvas);
          t.wrapS = THREE.RepeatWrapping;
@@ -257,46 +284,291 @@ const SceneContent: React.FC<SceneContentProps> = ({
   };
 
   return (
-    <group>
-        {/* Main Sky Sphere */}
-        <Sphere 
-          args={[10, 64, 64]} 
-          scale={[-1, 1, 1]}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerLeave}
-        > 
-          <shaderMaterial
-              ref={materialRef}
-              args={[FlowShaderMaterial]}
-              side={THREE.DoubleSide}
-          />
-        </Sphere>
+    <group rotation={[0, projectionType === 'polar' ? -Math.PI / 2 : 0, 0]}>
+        {/* Main Sky Mesh */}
+        {projectionType === 'planar' ? (
+            <Plane
+                args={[20, 20 / planeAspect]}
+                position={[0, -5, 0]}
+                rotation={[-Math.PI / 2, 0, 0]}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerLeave={handlePointerLeave}
+            >
+                <shaderMaterial
+                    ref={materialRef}
+                    args={[FlowShaderMaterial]}
+                    side={THREE.DoubleSide}
+                />
+            </Plane>
+        ) : (
+            <Sphere 
+              args={[10, 64, 64]} 
+              scale={[-1, 1, 1]}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerLeave}
+            > 
+              <shaderMaterial
+                  ref={materialRef}
+                  args={[FlowShaderMaterial]}
+                  side={THREE.DoubleSide}
+              />
+            </Sphere>
+        )}
         
         {/* Flow Arrows Overlay */}
         {isPaintMode && (
-            <Sphere args={[9.8, 64, 32]} scale={[-1, 1, 1]} raycast={() => null}>
-                <shaderMaterial 
-                    ref={arrowMaterialRef}
-                    args={[ArrowShaderMaterial]}
-                    side={THREE.DoubleSide}
-                    transparent={true}
-                />
-            </Sphere>
+            projectionType === 'planar' ? (
+                <Plane 
+                    args={[20, 20 / planeAspect]} 
+                    position={[0, -4.99, 0]} 
+                    rotation={[-Math.PI / 2, 0, 0]}
+                    raycast={() => null}
+                >
+                    <shaderMaterial 
+                        ref={arrowMaterialRef}
+                        args={[ArrowShaderMaterial]}
+                        side={THREE.DoubleSide}
+                        transparent={true}
+                    />
+                </Plane>
+            ) : (
+                <Sphere args={[9.8, 64, 32]} scale={[-1, 1, 1]} raycast={() => null}>
+                    <shaderMaterial 
+                        ref={arrowMaterialRef}
+                        args={[ArrowShaderMaterial]}
+                        side={THREE.DoubleSide}
+                        transparent={true}
+                    />
+                </Sphere>
+            )
         )}
     </group>
   );
 };
 
-interface PreviewSceneProps extends Omit<SceneContentProps, 'flowVersion' | 'polarAngle' | 'showFlowMap'> {
+const UEControls = ({ 
+  controlsRef, 
+  projectionType,
+  onSetBrushSize,
+  currentBrushSize
+}: { 
+  controlsRef: React.MutableRefObject<any>, 
+  projectionType: ProjectionType,
+  onSetBrushSize?: (size: number) => void,
+  currentBrushSize: number
+}) => {
+  const { camera, gl } = useThree();
+  const keys = useRef({ w: false, a: false, s: false, d: false, q: false, e: false });
+  const isRightMouseDown = useRef(false);
+  
+  // Brush Resize State
+  const isFKeyPressed = useRef(false);
+  const hasResizedBrush = useRef(false);
+  const fKeyAccumulatedMovement = useRef(0);
+  const currentBrushSizeRef = useRef(currentBrushSize);
+
+  // Keep ref in sync
+  useEffect(() => {
+    currentBrushSizeRef.current = currentBrushSize;
+  }, [currentBrushSize]);
+
+  // Auto-reset camera when projection type changes
+  useEffect(() => {
+    if (projectionType === 'planar') {
+      camera.position.set(0, 0, 10);
+      if (controlsRef.current) {
+        controlsRef.current.target.set(0, -5, 0);
+        controlsRef.current.update();
+      }
+    } else {
+      camera.position.set(0, 0, 0.1);
+      if (controlsRef.current) {
+        controlsRef.current.target.set(0, 0, 0);
+        controlsRef.current.update();
+      }
+    }
+  }, [projectionType, camera]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === 'f') {
+        if (!isFKeyPressed.current) {
+            isFKeyPressed.current = true;
+            hasResizedBrush.current = false;
+            fKeyAccumulatedMovement.current = 0;
+            // Lock pointer to prevent cursor movement during potential resize
+            gl.domElement.requestPointerLock();
+        }
+        return;
+      }
+      if (key in keys.current) {
+        keys.current[key as keyof typeof keys.current] = true;
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase();
+      if (key === 'f') {
+        isFKeyPressed.current = false;
+        document.exitPointerLock();
+        
+        // Only trigger reset if we didn't resize the brush (and exceeded threshold)
+        if (!hasResizedBrush.current) {
+            if (projectionType === 'planar') {
+              // Reset to view the plane from a perspective angle
+              camera.position.set(0, 0, 10);
+              if (controlsRef.current) {
+                controlsRef.current.target.set(0, -5, 0);
+                controlsRef.current.update();
+              }
+            } else {
+              // Reset to center of sphere, keeping viewing direction
+              if (controlsRef.current) {
+                const offset = new THREE.Vector3().subVectors(controlsRef.current.target, camera.position);
+                camera.position.set(0, 0, 0.1);
+                controlsRef.current.target.copy(camera.position).add(offset);
+                controlsRef.current.update();
+              }
+            }
+        }
+        hasResizedBrush.current = false;
+        fKeyAccumulatedMovement.current = 0;
+        return;
+      }
+      if (key in keys.current) {
+        keys.current[key as keyof typeof keys.current] = false;
+      }
+    };
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button === 2) isRightMouseDown.current = true;
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+      if (e.button === 2) isRightMouseDown.current = false;
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // Handle Brush Resize
+      if (isFKeyPressed.current && onSetBrushSize) {
+          fKeyAccumulatedMovement.current += Math.abs(e.movementX) + Math.abs(e.movementY);
+          
+          // Threshold to prevent accidental resize when just clicking F for reset
+          if (fKeyAccumulatedMovement.current > 5 || hasResizedBrush.current) {
+              hasResizedBrush.current = true;
+              const delta = e.movementX;
+              // Adjust sensitivity and clamp
+              const newSize = Math.max(1, Math.min(200, currentBrushSizeRef.current + delta * 0.5));
+              onSetBrushSize(newSize);
+          }
+          return; // Stop camera movement while holding F (even if below threshold, to be safe)
+      }
+
+      if (!isRightMouseDown.current || !controlsRef.current) return;
+      
+      const { movementX, movementY } = e;
+      const sensitivity = 0.002;
+      
+      const controls = controlsRef.current;
+      const target = controls.target;
+      
+      const vector = new THREE.Vector3();
+      vector.subVectors(target, camera.position);
+      
+      // Yaw: Rotate around World UP (0,1,0)
+      // Mouse Left (neg X) -> Look Left -> Rotate vector around +Y
+      vector.applyAxisAngle(new THREE.Vector3(0, 1, 0), -movementX * sensitivity);
+      
+      // Pitch: Rotate around Camera Right
+      const right = new THREE.Vector3().crossVectors(vector, new THREE.Vector3(0, 1, 0)).normalize();
+      
+      // Mouse Up (neg Y) -> Look Up -> Rotate vector around Right
+      vector.applyAxisAngle(right, -movementY * sensitivity);
+      
+      target.copy(camera.position).add(vector);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('mousemove', handleMouseMove);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('mousemove', handleMouseMove);
+    };
+  }, [camera, projectionType, onSetBrushSize]);
+
+  useFrame((state, delta) => {
+    if (!isRightMouseDown.current || !controlsRef.current) return;
+
+    const { w, a, s, d, q, e } = keys.current;
+    if (!w && !a && !s && !d && !q && !e) return;
+
+    const speed = 10.0 * delta; 
+    const moveDir = new THREE.Vector3();
+    
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    
+    const right = new THREE.Vector3();
+    right.crossVectors(forward, camera.up).normalize();
+    
+    const up = new THREE.Vector3(0, 1, 0);
+
+    if (w) moveDir.add(forward);
+    if (s) moveDir.sub(forward);
+    if (d) moveDir.add(right);
+    if (a) moveDir.sub(right);
+    if (e) moveDir.add(up);
+    if (q) moveDir.sub(up);
+
+    if (moveDir.lengthSq() > 0) {
+      moveDir.normalize().multiplyScalar(speed);
+      
+      camera.position.add(moveDir);
+      controlsRef.current.target.add(moveDir);
+    }
+  });
+
+  return null;
+};
+
+interface PreviewSceneProps extends Omit<SceneContentProps, 'flowVersion' | 'polarAngle' | 'showFlowMap' | 'arrowDensity'> {
   className?: string;
   flowVersion?: number;
   polarAngle?: number;
   showFlowMap?: boolean;
+  arrowDensity?: number;
 }
 
 const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
+  const controlsRef = useRef<any>(null);
+  const [isCtrlPressed, setIsCtrlPressed] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Control') setIsCtrlPressed(true);
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control') setIsCtrlPressed(false);
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
   return (
     <div className={`relative w-full h-full ${props.className}`}>
       <Canvas 
@@ -310,8 +582,16 @@ const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
           flowVersion={props.flowVersion || 0} 
           polarAngle={props.polarAngle || 90} 
           showFlowMap={props.showFlowMap || false}
+          arrowDensity={props.arrowDensity || 64}
+        />
+        <UEControls 
+          controlsRef={controlsRef}  
+          projectionType={props.projectionType} 
+          onSetBrushSize={props.onSetBrushSize}
+          currentBrushSize={props.brushSettings.size}
         />
         <OrbitControls 
+          ref={controlsRef}
           makeDefault 
           enableZoom={true} 
           enablePan={false} 
@@ -319,10 +599,13 @@ const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
           enabled={true} 
           mouseButtons={{
             LEFT: undefined as unknown as THREE.MOUSE,
-            MIDDLE: THREE.MOUSE.ROTATE,
-            RIGHT: THREE.MOUSE.PAN
+            MIDDLE: isCtrlPressed ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE,
+            RIGHT: undefined as unknown as THREE.MOUSE
           }}
         />
+        <GizmoHelper alignment="top-right" margin={[80, 80]}>
+          <GizmoViewport axisColors={['#ff3653', '#0adb50', '#2c8fdf']} labelColor="white" />
+        </GizmoHelper>
       </Canvas>
     </div>
   );

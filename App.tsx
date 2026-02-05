@@ -12,7 +12,9 @@ import {
   Columns,
   Layers,
   ArrowRightLeft,
-  Wand2
+  Wand2,
+  Trash2,
+  RefreshCw
 } from 'lucide-react';
 import FlowPainter from './components/FlowPainter';
 import PreviewScene from './components/PreviewScene';
@@ -39,6 +41,11 @@ const App: React.FC = () => {
   const [windDirection, setWindDirection] = useState(45); // Default 45 to show movement
   const [windTrigger, setWindTrigger] = useState(0);
   const [resetTrigger, setResetTrigger] = useState(0);
+
+  // Triggers for clearing layers
+  const [clearBrushTrigger, setClearBrushTrigger] = useState(0);
+  const [clearGlobalTrigger, setClearGlobalTrigger] = useState(0);
+  const [clearObstacleTrigger, setClearObstacleTrigger] = useState(0);
   
   // Layer Settings
   const [globalBlur, setGlobalBlur] = useState(0);
@@ -48,6 +55,7 @@ const App: React.FC = () => {
   // Layer Visibility
   const [globalLayerVisible, setGlobalLayerVisible] = useState(true);
   const [obstacleLayerVisible, setObstacleLayerVisible] = useState(true);
+  const [brushLayerVisible, setBrushLayerVisible] = useState(true);
   
   // Magic Wand Settings
   const [magicWandThreshold, setMagicWandThreshold] = useState(20);
@@ -67,15 +75,27 @@ const App: React.FC = () => {
   const [flowCanvas, setFlowCanvas] = useState<HTMLCanvasElement | null>(null);
   const [previewSpeed, setPreviewSpeed] = useState(0.2);
   const [previewDistortion, setPreviewDistortion] = useState(0.1);
+  const [arrowDensity, setArrowDensity] = useState(48);
   
 
   const containerRef = useRef<HTMLDivElement>(null);
   const flowPainterRef = useRef<FlowPainterHandle>(null);
+  const isRightMouseDown = useRef(false);
 
-  const handleResetCanvas = () => {
-      if (confirm("清空绘制的流动层？")) {
-          setResetTrigger(prev => prev + 1);
-      }
+  const handleClearBrush = () => {
+      setClearBrushTrigger(prev => prev + 1);
+  };
+
+  const handleClearGlobal = () => {
+      setClearGlobalTrigger(prev => prev + 1);
+  };
+
+  const handleRegenerateGlobal = () => {
+      setWindTrigger(prev => prev + 1);
+  };
+
+  const handleClearObstacle = () => {
+      setClearObstacleTrigger(prev => prev + 1);
   };
 
   // Callback when FlowPainter finishes expensive operations like Wind or Reset
@@ -160,11 +180,21 @@ const App: React.FC = () => {
 
   // Keyboard shortcuts
   useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
+        if (e.button === 2) isRightMouseDown.current = true;
+    };
+    const handleMouseUp = (e: MouseEvent) => {
+        if (e.button === 2) isRightMouseDown.current = false;
+    };
+    
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
         return;
       }
+
+      // If right mouse button is held (e.g. for camera movement), ignore tool shortcuts
+      if (isRightMouseDown.current) return;
 
       const key = e.key.toLowerCase();
 
@@ -211,8 +241,12 @@ const App: React.FC = () => {
     };
 
     window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('mouseup', handleMouseUp);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('mouseup', handleMouseUp);
     };
   }, [activeTool]);
 
@@ -330,6 +364,12 @@ const App: React.FC = () => {
                    >
                      <div className="w-3 h-3 rounded-full border-2 border-current"></div> 极坐标
                    </button>
+                   <button 
+                    onClick={() => setProjectionType('planar')}
+                    className={`flex-1 py-1.5 rounded flex items-center justify-center gap-1 transition-all ${projectionType === 'planar' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                   >
+                     <div className="w-3 h-3 border border-current"></div> 平面
+                   </button>
                </div>
                
                {projectionType === 'polar' && (
@@ -356,14 +396,200 @@ const App: React.FC = () => {
 
           <hr className="border-slate-700" />
           
+          {/* Section: Layer 1 - Global Flow */}
+          <section className="space-y-3">
+             <div className="flex items-center justify-between">
+               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <Compass className="w-4 h-4" /> 全局方向
+               </h2>
+               <div className="flex items-center gap-2">
+                   <button 
+                       onClick={handleRegenerateGlobal}
+                       className="text-slate-500 hover:text-indigo-500 transition-colors"
+                       title="重新生成全局方向"
+                   >
+                       <RefreshCw className="w-4 h-4" />
+                   </button>
+                   <button 
+                       onClick={handleClearGlobal}
+                       className="text-slate-500 hover:text-rose-500 transition-colors"
+                       title="重置全局方向层"
+                   >
+                       <Trash2 className="w-4 h-4" />
+                   </button>
+                   <button 
+                     onClick={() => setGlobalLayerVisible(!globalLayerVisible)}
+                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${globalLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                     title={globalLayerVisible ? "隐藏图层" : "显示图层"}
+                   >
+                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${globalLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
+                   </button>
+               </div>
+             </div>
+            <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${globalLayerVisible ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+              <div className="overflow-hidden">
+                <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
+                <div className="flex justify-between text-xs text-slate-400 mb-1">
+                  <span>方向角度</span>
+                  <span>{windDirection}°</span>
+                </div>
+                <div className="flex gap-2 items-center">
+                    <input 
+                      type="range" min="0" max="360"
+                      value={windDirection}
+                      onChange={(e) => setWindDirection(Number(e.target.value))}
+                      className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    />
+                </div>
+                
+                <div className="space-y-2">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 全局模糊</span>
+                      <span>{globalBlur}px</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="32"
+                      value={globalBlur}
+                      onChange={(e) => setGlobalBlur(Number(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    />
+                </div>
+              </div>
+            </div>
+          </div>
+          </section>
+
+          <hr className="border-slate-700" />
+
+          {/* Section: Layer 2 - Obstacles */}
+          <section className="space-y-3">
+             <div className="flex items-center justify-between">
+               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+                <Eraser className="w-4 h-4" /> 障碍物 (遮罩)
+               </h2>
+               <div className="flex items-center gap-2">
+                   <button 
+                       onClick={handleClearObstacle}
+                       className="text-slate-500 hover:text-rose-500 transition-colors"
+                       title="清空障碍物层"
+                   >
+                       <Trash2 className="w-4 h-4" />
+                   </button>
+                   <button 
+                     onClick={() => setObstacleLayerVisible(!obstacleLayerVisible)}
+                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${obstacleLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                     title={obstacleLayerVisible ? "隐藏图层" : "显示图层"}
+                   >
+                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${obstacleLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
+                   </button>
+               </div>
+             </div>
+            <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${obstacleLayerVisible ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+              <div className="overflow-hidden">
+                <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setActiveTool('obstacle');
+                      setBrushSettings(p => ({ ...p, isEraser: false }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                  >
+                     绘制障碍
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTool('obstacle_eraser');
+                      setBrushSettings(p => ({ ...p, isEraser: true }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle_eraser' ? 'bg-amber-800 border-amber-700 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                  >
+                     擦除障碍
+                  </button>
+                  <button
+                    onClick={() => {
+                      setActiveTool('magic_wand');
+                      setBrushSettings(p => ({ ...p, isEraser: false }));
+                    }}
+                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'magic_wand' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
+                    title="魔棒工具 (快速选择障碍物)"
+                  >
+                     <Wand2 className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {activeTool === 'magic_wand' && (
+                  <div className="space-y-2 pt-1 border-t border-slate-700/50">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>魔棒容差</span>
+                      <span>{magicWandThreshold}</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="100"
+                      value={magicWandThreshold}
+                      onChange={(e) => setMagicWandThreshold(Number(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                    />
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-1">
+                   <span className="text-xs text-slate-400">显示红色遮罩</span>
+                   <button 
+                     onClick={() => {
+                       console.log('[App] Toggling Red Mask to:', !showMaskOverlay);
+                       setShowMaskOverlay(!showMaskOverlay);
+                     }}
+                     className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${showMaskOverlay ? 'bg-red-600' : 'bg-slate-700'}`}
+                   >
+                     <span className={`inline-block h-2 w-2 transform rounded-full bg-white transition-transform ${showMaskOverlay ? 'translate-x-4' : 'translate-x-1'}`} />
+                   </button>
+                </div>
+
+                <div className="space-y-2">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 障碍物边缘模糊</span>
+                      <span>{obstacleBlur}px</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="32"
+                      value={obstacleBlur}
+                      onChange={(e) => setObstacleBlur(Number(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
+                </div>
+              </div>
+            </div>
+          </div>
+          </section>
+
+          <hr className="border-slate-700" />
+          
           {/* Section: Layer 3 - Free Brush (Moved to Top) */}
           <section className="space-y-3">
              <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                     <Palette className="w-4 h-4" /> 自由笔刷
                 </h2>
+                <div className="flex items-center gap-2">
+                     <button 
+                         onClick={handleClearBrush}
+                         className="text-slate-500 hover:text-rose-500 transition-colors"
+                         title="清空自由笔刷层"
+                     >
+                         <Trash2 className="w-4 h-4" />
+                     </button>
+                     <button 
+                         onClick={() => setBrushLayerVisible(!brushLayerVisible)}
+                         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${brushLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                         title={brushLayerVisible ? "隐藏图层" : "显示图层"}
+                     >
+                         <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${brushLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
+                     </button>
+                </div>
              </div>
             
+            {brushLayerVisible && (
             <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
                 <div className="flex gap-2">
                   <button
@@ -441,154 +667,6 @@ const App: React.FC = () => {
                         />
                     </div>
                 </div>
-
-                <div className="pt-2">
-                    <button 
-                        onClick={handleResetCanvas}
-                        className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-1.5 rounded text-xs font-medium transition-colors"
-                    >
-                        清空所有图层
-                    </button>
-                </div>
-            </div>
-          </section>
-
-          <hr className="border-slate-700" />
-          
-          {/* Section: Layer 1 - Global Flow */}
-          <section className="space-y-3">
-             <div className="flex items-center justify-between">
-               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Compass className="w-4 h-4" /> 全局方向
-               </h2>
-               <button 
-                 onClick={() => setGlobalLayerVisible(!globalLayerVisible)}
-                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${globalLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                 title={globalLayerVisible ? "隐藏图层" : "显示图层"}
-               >
-                 <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${globalLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
-               </button>
-             </div>
-            {globalLayerVisible && (
-            <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>方向角度</span>
-                  <span>{windDirection}°</span>
-                </div>
-                <div className="flex gap-2 items-center">
-                    <input 
-                      type="range" min="0" max="360"
-                      value={windDirection}
-                      onChange={(e) => setWindDirection(Number(e.target.value))}
-                      className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
-                    />
-                </div>
-                
-                <div className="space-y-2">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 全局模糊</span>
-                      <span>{globalBlur}px</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="32"
-                      value={globalBlur}
-                      onChange={(e) => setGlobalBlur(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                </div>
-            </div>
-            )}
-          </section>
-
-          <hr className="border-slate-700" />
-
-          {/* Section: Layer 2 - Obstacles */}
-          <section className="space-y-3">
-             <div className="flex items-center justify-between">
-               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Eraser className="w-4 h-4" /> 障碍物 (遮罩)
-               </h2>
-               <button 
-                 onClick={() => setObstacleLayerVisible(!obstacleLayerVisible)}
-                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${obstacleLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                 title={obstacleLayerVisible ? "隐藏图层" : "显示图层"}
-               >
-                 <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${obstacleLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
-               </button>
-             </div>
-            {obstacleLayerVisible && (
-            <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      setActiveTool('obstacle');
-                      setBrushSettings(p => ({ ...p, isEraser: false }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                  >
-                     绘制障碍
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTool('obstacle_eraser');
-                      setBrushSettings(p => ({ ...p, isEraser: true }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle_eraser' ? 'bg-amber-800 border-amber-700 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                  >
-                     擦除障碍
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTool('magic_wand');
-                      setBrushSettings(p => ({ ...p, isEraser: false }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'magic_wand' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                    title="魔棒工具 (快速选择障碍物)"
-                  >
-                     <Wand2 className="w-3 h-3" />
-                  </button>
-                </div>
-
-                {activeTool === 'magic_wand' && (
-                  <div className="space-y-2 pt-1 border-t border-slate-700/50">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>魔棒容差</span>
-                      <span>{magicWandThreshold}</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100"
-                      value={magicWandThreshold}
-                      onChange={(e) => setMagicWandThreshold(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                    />
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between pt-1">
-                   <span className="text-xs text-slate-400">显示红色遮罩</span>
-                   <button 
-                     onClick={() => {
-                       console.log('[App] Toggling Red Mask to:', !showMaskOverlay);
-                       setShowMaskOverlay(!showMaskOverlay);
-                     }}
-                     className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${showMaskOverlay ? 'bg-red-600' : 'bg-slate-700'}`}
-                   >
-                     <span className={`inline-block h-2 w-2 transform rounded-full bg-white transition-transform ${showMaskOverlay ? 'translate-x-4' : 'translate-x-1'}`} />
-                   </button>
-                </div>
-
-                <div className="space-y-2">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 障碍物边缘模糊</span>
-                      <span>{obstacleBlur}px</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="32"
-                      value={obstacleBlur}
-                      onChange={(e) => setObstacleBlur(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                    />
-                </div>
             </div>
             )}
           </section>
@@ -612,12 +690,15 @@ const App: React.FC = () => {
               onTextureUpdate={handleTextureUpdate}
               windDirection={windDirection}
               windTrigger={windTrigger}
-              resetTrigger={resetTrigger}
+              clearBrushTrigger={clearBrushTrigger}
+              clearGlobalTrigger={clearGlobalTrigger}
+              clearObstacleTrigger={clearObstacleTrigger}
               globalBlur={globalBlur}
               obstacleBlur={obstacleBlur}
               brushBlur={brushBlur}
               globalLayerVisible={globalLayerVisible}
               obstacleLayerVisible={obstacleLayerVisible}
+              brushLayerVisible={brushLayerVisible}
               magicWandThreshold={magicWandThreshold}
               showMaskOverlay={showMaskOverlay}
               onPaintingComplete={handlePaintingComplete}
@@ -680,6 +761,19 @@ const App: React.FC = () => {
                         />
                         <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{previewDistortion.toFixed(2)}</span>
                     </div>
+
+                    <div className="w-px h-4 bg-white/10"></div>
+
+                    <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">箭头密度</span>
+                        <input 
+                        type="range" min="16" max="128" step="4"
+                        value={arrowDensity}
+                        onChange={(e) => setArrowDensity(Number(e.target.value))}
+                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        />
+                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{arrowDensity}</span>
+                    </div>
                   </div>
                </div>
             </div>
@@ -723,9 +817,11 @@ const App: React.FC = () => {
               onPaintEnd={handle3DPaintEnd}
               projectionType={projectionType}
               polarAngle={polarAngle}
-              showFlowMap={showFlowMap}
-            />
-          </div>
+              arrowDensity={arrowDensity}
+          showFlowMap={showFlowMap}
+          onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
+        />
+      </div>
         </div>
       </main>
     </div>

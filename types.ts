@@ -15,7 +15,7 @@ export interface LayerSettings {
     visible: boolean;
 }
 
-export type ProjectionType = 'equirectangular' | 'polar';
+export type ProjectionType = 'equirectangular' | 'polar' | 'planar';
 
 export interface FlowPainterHandle {
   stroke: (u: number, v: number, lastU: number, lastV: number) => void;

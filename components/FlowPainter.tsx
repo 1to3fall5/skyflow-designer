@@ -9,6 +9,9 @@ interface FlowPainterProps {
   windDirection?: number;
   windTrigger?: number;
   resetTrigger?: number;
+  clearBrushTrigger?: number;
+  clearGlobalTrigger?: number;
+  clearObstacleTrigger?: number;
   
   // Layer Settings
   globalBlur: number;
@@ -17,6 +20,7 @@ interface FlowPainterProps {
   
   globalLayerVisible?: boolean;
   obstacleLayerVisible?: boolean;
+  brushLayerVisible?: boolean;
   
   // Magic Wand
   magicWandThreshold?: number;
@@ -37,11 +41,15 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   windDirection = 0,
   windTrigger = 0,
   resetTrigger = 0,
+  clearBrushTrigger = 0,
+  clearGlobalTrigger = 0,
+  clearObstacleTrigger = 0,
   globalBlur = 0,
   obstacleBlur = 0,
   brushBlur = 0,
   globalLayerVisible = true,
   obstacleLayerVisible = true,
+  brushLayerVisible = true,
   magicWandThreshold = 20,
   showMaskOverlay = false,
   showReference = false,
@@ -182,7 +190,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     }
 
     // 2. Draw Brush Layer to Flow Map
-    if (layerBrushRef.current) {
+    if (layerBrushRef.current && brushLayerVisible) {
         // Create a temp canvas for blurred brush
         if (!tempBrushRef.current) {
             tempBrushRef.current = document.createElement('canvas');
@@ -256,7 +264,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             ctx.restore();
         }
     }
-  }, [onTextureUpdate, globalBlur, obstacleBlur, brushBlur, drawBlurred, globalLayerVisible, obstacleLayerVisible, showMaskOverlay]);
+  }, [onTextureUpdate, globalBlur, obstacleBlur, brushBlur, drawBlurred, globalLayerVisible, obstacleLayerVisible, brushLayerVisible, showMaskOverlay]);
 
   const saveHistory = useCallback(() => {
     const brushCanvas = layerBrushRef.current;
@@ -395,9 +403,25 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             const x = pixelIndex % w;
             const y = Math.floor(pixelIndex / w);
             
-            // Add neighbors
-            if (x > 0) stack.push((idx - 4));
-            if (x < w - 1) stack.push((idx + 4));
+            // Add neighbors with wrapping support
+            const isWrappable = projectionType === 'equirectangular' || projectionType === 'polar';
+            
+            if (x > 0) {
+                stack.push((idx - 4));
+            } else if (isWrappable) {
+                // Wrap Left -> Right (x=0 -> x=w-1)
+                // idx is at x=0. neighbor at x=w-1 is + (w-1)*4
+                stack.push(idx + (w - 1) * 4);
+            }
+
+            if (x < w - 1) {
+                stack.push((idx + 4));
+            } else if (isWrappable) {
+                // Wrap Right -> Left (x=w-1 -> x=0)
+                // idx is at x=w-1. neighbor at x=0 is - (w-1)*4
+                stack.push(idx - (w - 1) * 4);
+            }
+            
             if (y > 0) stack.push((idx - w * 4));
             if (y < h - 1) stack.push((idx + w * 4));
         }
@@ -406,7 +430,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     obsCtx.putImageData(obsData, 0, 0);
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
-  }, [renderComposite, onPaintingComplete, saveHistory]);
+  }, [renderComposite, onPaintingComplete, saveHistory, projectionType]);
 
   // Initialize Layers
   useEffect(() => {
@@ -513,10 +537,49 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const y = v * h;
     const lx = lu * w;
     const ly = lv * h;
+
+    // Check for wrapping (Equirectangular and Polar wrap on U axis)
+    const isWrappable = projectionType === 'equirectangular' || projectionType === 'polar';
+    const dx = x - lx;
+    const wrapThreshold = w * 0.5;
+
+    if (isWrappable && Math.abs(dx) > wrapThreshold) {
+        // Wrapped detected
+        if (dx > 0) {
+            // Jumped "Left" (e.g. 0.1 -> 0.9, dx > 0.5)
+            // Effectively u moved to u - 1.0
+            drawStamp(targetCanvas, x - w, y, lx, ly, brushSettings, activeTool);
+            // And lu moved to lu + 1.0
+            drawStamp(targetCanvas, x, y, lx + w, ly, brushSettings, activeTool);
+        } else {
+             // Jumped "Right" (e.g. 0.9 -> 0.1, dx < -0.5)
+             // Effectively u moved to u + 1.0
+             drawStamp(targetCanvas, x + w, y, lx, ly, brushSettings, activeTool);
+             // And lu moved to lu - 1.0
+             drawStamp(targetCanvas, x, y, lx - w, ly, brushSettings, activeTool);
+        }
+    } else {
+        // Normal Stroke
+        drawStamp(targetCanvas, x, y, lx, ly, brushSettings, activeTool);
+        
+        // Seamless Tiling (Draw ghost if near edge)
+        if (isWrappable) {
+             const radius = brushSettings.size / 2;
+             
+             // If painting near Left Edge, draw ghost on Right
+             if (x < radius || lx < radius) {
+                 drawStamp(targetCanvas, x + w, y, lx + w, ly, brushSettings, activeTool);
+             }
+             
+             // If painting near Right Edge, draw ghost on Left
+             if (x > w - radius || lx > w - radius) {
+                 drawStamp(targetCanvas, x - w, y, lx - w, ly, brushSettings, activeTool);
+             }
+        }
+    }
     
-    drawStamp(targetCanvas, x, y, lx, ly, brushSettings, activeTool);
     renderComposite();
-  }, [activeTool, brushSettings, drawStamp, renderComposite]);
+  }, [activeTool, brushSettings, drawStamp, renderComposite, projectionType]);
 
   useImperativeHandle(ref, () => ({
     stroke,
@@ -526,8 +589,34 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     saveHistory
   }));
 
+  // Track previous triggers to avoid re-running effects on unrelated renders
+  const lastWindTrigger = useRef<number | null>(null);
+  const lastWindDirection = useRef<number | null>(null);
+  const lastProjectionType = useRef<ProjectionType | null>(null);
+  const lastPolarAngle = useRef<number | null>(null);
+
+  const lastClearBrushTrigger = useRef(clearBrushTrigger);
+  const lastClearGlobalTrigger = useRef(clearGlobalTrigger);
+  const lastClearObstacleTrigger = useRef(clearObstacleTrigger);
+  const lastResetTrigger = useRef(resetTrigger);
+
   // Generate Wind Effect (Global Layer)
   useEffect(() => {
+    // Check if relevant props actually changed
+    const windChanged = 
+        windTrigger !== lastWindTrigger.current ||
+        windDirection !== lastWindDirection.current ||
+        projectionType !== lastProjectionType.current ||
+        polarAngle !== lastPolarAngle.current;
+    
+    // Update refs
+    lastWindTrigger.current = windTrigger;
+    lastWindDirection.current = windDirection;
+    lastProjectionType.current = projectionType;
+    lastPolarAngle.current = polarAngle;
+
+    if (!windChanged) return;
+
     // Generate wind if trigger fires OR wind parameters change
     // But we only need to generate if we have a context
     if (!layerGlobalRef.current) return;
@@ -552,84 +641,99 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const step = 0.05; 
     const strength = 15.0; 
 
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const index = (y * width + x) * 4;
-            const u = (x + 0.5) / width;
-            const v = 1.0 - ((y + 0.5) / height); 
-
-            let valid = true;
-            let nx = 0, ny = 0, nz = 0;
-            let px = 0, py = 0, pz = 0;
-
-            if (projectionType === 'polar') {
-                const uc = u - 0.5;
-                const vc = v - 0.5;
-                const r = Math.sqrt(uc*uc + vc*vc);
-                if (r > 0.5) {
-                    valid = false;
+    if (projectionType === 'planar') {
+        const du = Wx * step; 
+        const dv = Wz * step;
+        
+        const r = Math.floor(Math.max(0, Math.min(255, 128 + (-du * strength * 127))));
+        const g = Math.floor(Math.max(0, Math.min(255, 128 + (-dv * strength * 127))));
+        
+        for (let i = 0; i < data.length; i += 4) {
+            data[i] = r;
+            data[i + 1] = g;
+            data[i + 2] = 0;
+            data[i + 3] = 255;
+        }
+    } else {
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const index = (y * width + x) * 4;
+                const u = (x + 0.5) / width;
+                const v = 1.0 - ((y + 0.5) / height); 
+    
+                let valid = true;
+                let nx = 0, ny = 0, nz = 0;
+                let px = 0, py = 0, pz = 0;
+    
+                if (projectionType === 'polar') {
+                    const uc = u - 0.5;
+                    const vc = v - 0.5;
+                    const r = Math.sqrt(uc*uc + vc*vc);
+                    if (r > 0.5) {
+                        valid = false;
+                    } else {
+                        const theta = Math.atan2(uc, vc);
+                        const phi = (r / 0.5) * polarRad;
+                        px = Math.sin(phi) * Math.sin(theta);
+                        py = Math.cos(phi);
+                        pz = Math.sin(phi) * Math.cos(theta);
+                    }
                 } else {
-                    const theta = Math.atan2(uc, vc);
-                    const phi = (r / 0.5) * polarRad;
+                    const phi = (1 - v) * Math.PI;
+                    const theta = u * 2 * Math.PI;
                     px = Math.sin(phi) * Math.sin(theta);
                     py = Math.cos(phi);
                     pz = Math.sin(phi) * Math.cos(theta);
                 }
-            } else {
-                const phi = (1 - v) * Math.PI;
-                const theta = u * 2 * Math.PI;
-                px = Math.sin(phi) * Math.sin(theta);
-                py = Math.cos(phi);
-                pz = Math.sin(phi) * Math.cos(theta);
-            }
-
-            if (!valid) {
-                data[index] = 128;
-                data[index + 1] = 128;
+    
+                if (!valid) {
+                    data[index] = 128;
+                    data[index + 1] = 128;
+                    data[index + 2] = 0;
+                    data[index + 3] = 255; // Full opacity for base
+                    continue;
+                }
+    
+                nx = px + Wx * step;
+                ny = py + Wy * step;
+                nz = pz + Wz * step;
+                const len = Math.sqrt(nx*nx + ny*ny + nz*nz);
+                nx /= len; ny /= len; nz /= len;
+    
+                let nextU = 0, nextV = 0;
+                if (projectionType === 'polar') {
+                    const clampedY = Math.max(-1, Math.min(1, ny));
+                    const phi = Math.acos(clampedY);
+                    const theta = Math.atan2(nx, nz);
+                    const r = (phi / polarRad) * 0.5;
+                    nextU = 0.5 + r * Math.sin(theta);
+                    nextV = 0.5 + r * Math.cos(theta);
+                } else {
+                    const clampedY = Math.max(-1, Math.min(1, ny));
+                    const phi = Math.acos(clampedY);
+                    const theta = Math.atan2(nx, nz);
+                    nextV = 1.0 - (phi / Math.PI);
+                    let normTheta = theta;
+                    if (normTheta < 0) normTheta += 2 * Math.PI;
+                    nextU = normTheta / (2 * Math.PI);
+                }
+    
+                let du = nextU - u;
+                let dv = nextV - v;
+    
+                if (projectionType === 'equirectangular') {
+                    if (du > 0.5) du -= 1.0;
+                    if (du < -0.5) du += 1.0;
+                }
+                
+                const r = Math.floor(Math.max(0, Math.min(255, 128 + (-du * strength * 127))));
+                const g = Math.floor(Math.max(0, Math.min(255, 128 + (-dv * strength * 127))));
+    
+                data[index] = r;
+                data[index + 1] = g;
                 data[index + 2] = 0;
-                data[index + 3] = 255; // Full opacity for base
-                continue;
+                data[index + 3] = 255;
             }
-
-            nx = px + Wx * step;
-            ny = py + Wy * step;
-            nz = pz + Wz * step;
-            const len = Math.sqrt(nx*nx + ny*ny + nz*nz);
-            nx /= len; ny /= len; nz /= len;
-
-            let nextU = 0, nextV = 0;
-            if (projectionType === 'polar') {
-                const clampedY = Math.max(-1, Math.min(1, ny));
-                const phi = Math.acos(clampedY);
-                const theta = Math.atan2(nx, nz);
-                const r = (phi / polarRad) * 0.5;
-                nextU = 0.5 + r * Math.sin(theta);
-                nextV = 0.5 + r * Math.cos(theta);
-            } else {
-                const clampedY = Math.max(-1, Math.min(1, ny));
-                const phi = Math.acos(clampedY);
-                const theta = Math.atan2(nx, nz);
-                nextV = 1.0 - (phi / Math.PI);
-                let normTheta = theta;
-                if (normTheta < 0) normTheta += 2 * Math.PI;
-                nextU = normTheta / (2 * Math.PI);
-            }
-
-            let du = nextU - u;
-            let dv = nextV - v;
-
-            if (projectionType === 'equirectangular') {
-                if (du > 0.5) du -= 1.0;
-                if (du < -0.5) du += 1.0;
-            }
-            
-            const r = Math.floor(Math.max(0, Math.min(255, 128 + (-du * strength * 127))));
-            const g = Math.floor(Math.max(0, Math.min(255, 128 + (-dv * strength * 127))));
-
-            data[index] = r;
-            data[index + 1] = g;
-            data[index + 2] = 0;
-            data[index + 3] = 255;
         }
     }
 
@@ -642,24 +746,76 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     
   }, [windTrigger, windDirection, renderComposite, onPaintingComplete, projectionType, polarAngle]);
 
+  // Handle Clear Brush Layer
+  useEffect(() => {
+    if (clearBrushTrigger !== lastClearBrushTrigger.current) {
+        lastClearBrushTrigger.current = clearBrushTrigger;
+        if (clearBrushTrigger > 0) {
+            if (layerBrushRef.current) {
+                const ctx = layerBrushRef.current.getContext('2d');
+                if (ctx) ctx.clearRect(0,0,1024,1024);
+            }
+            renderComposite();
+            saveHistory();
+            if (onPaintingComplete) onPaintingComplete();
+        }
+    }
+  }, [clearBrushTrigger, renderComposite, onPaintingComplete, saveHistory]);
+
+  // Handle Clear Global Layer
+  useEffect(() => {
+    if (clearGlobalTrigger !== lastClearGlobalTrigger.current) {
+        lastClearGlobalTrigger.current = clearGlobalTrigger;
+        if (clearGlobalTrigger > 0) {
+            if (layerGlobalRef.current) {
+                const ctx = layerGlobalRef.current.getContext('2d');
+                // Reset to neutral flow (no movement)
+                if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
+            }
+            renderComposite();
+            saveHistory();
+            if (onPaintingComplete) onPaintingComplete();
+        }
+    }
+  }, [clearGlobalTrigger, renderComposite, onPaintingComplete, saveHistory]);
+
+  // Handle Clear Obstacle Layer
+  useEffect(() => {
+    if (clearObstacleTrigger !== lastClearObstacleTrigger.current) {
+        lastClearObstacleTrigger.current = clearObstacleTrigger;
+        if (clearObstacleTrigger > 0) {
+            if (layerObstacleRef.current) {
+                const ctx = layerObstacleRef.current.getContext('2d');
+                if (ctx) ctx.clearRect(0,0,1024,1024);
+            }
+            renderComposite();
+            saveHistory();
+            if (onPaintingComplete) onPaintingComplete();
+        }
+    }
+  }, [clearObstacleTrigger, renderComposite, onPaintingComplete, saveHistory]);
+
   // Handle Reset (Clear Brush and Obstacle layers, Reset Global to neutral)
   useEffect(() => {
-      if (resetTrigger > 0) {
-          if (layerGlobalRef.current) {
-               const ctx = layerGlobalRef.current.getContext('2d');
-               if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
+      if (resetTrigger !== lastResetTrigger.current) {
+          lastResetTrigger.current = resetTrigger;
+          if (resetTrigger > 0) {
+              if (layerGlobalRef.current) {
+                  const ctx = layerGlobalRef.current.getContext('2d');
+                  if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
+              }
+              if (layerBrushRef.current) {
+                  const ctx = layerBrushRef.current.getContext('2d');
+                  if (ctx) ctx.clearRect(0,0,1024,1024);
+              }
+              if (layerObstacleRef.current) {
+                  const ctx = layerObstacleRef.current.getContext('2d');
+                  if (ctx) ctx.clearRect(0,0,1024,1024);
+              }
+              renderComposite();
+              saveHistory();
+              if (onPaintingComplete) onPaintingComplete();
           }
-          if (layerBrushRef.current) {
-               const ctx = layerBrushRef.current.getContext('2d');
-               if (ctx) ctx.clearRect(0,0,1024,1024);
-          }
-          if (layerObstacleRef.current) {
-               const ctx = layerObstacleRef.current.getContext('2d');
-               if (ctx) ctx.clearRect(0,0,1024,1024);
-          }
-          renderComposite();
-          saveHistory();
-          if (onPaintingComplete) onPaintingComplete();
       }
   }, [resetTrigger, renderComposite, onPaintingComplete, saveHistory]);
 
