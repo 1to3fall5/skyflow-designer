@@ -122,7 +122,8 @@ const App: React.FC = () => {
 
   // Handlers
   const handleTextureUpdate = useCallback((canvas: HTMLCanvasElement) => {
-    setFlowCanvas(canvas); 
+    setFlowCanvas(prev => prev === canvas ? prev : canvas); 
+    setFlowVersion(v => v + 1);
   }, []);
 
   const handleExport = () => {

@@ -121,17 +121,29 @@ const SceneContent: React.FC<SceneContentProps> = ({
     if (materialRef.current) {
       materialRef.current.uniforms.uTime.value = state.clock.elapsedTime;
       
+      // Update cursor position every frame for smoothness
+      materialRef.current.uniforms.uCursor.value.copy(cursorUV.current);
+
       const shouldUpdate = flowVersion !== prevVersion.current || isDragging.current;
       
-      if (shouldUpdate || (flowCanvas && materialRef.current.uniforms.uFlowMap.value.image === flowCanvas)) {
+      if (shouldUpdate) {
          if (flowVersion !== prevVersion.current) {
              prevVersion.current = flowVersion;
          }
          materialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
       }
-      
+    }
+    if (arrowMaterialRef.current) {
+      if (materialRef.current?.uniforms.uFlowMap.value.needsUpdate) {
+        arrowMaterialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
+      }
+    }
+  });
+
+  // Update other static/slow uniforms via effect to save frame time
+  useEffect(() => {
+    if (materialRef.current) {
       const uvRadius = (brushSettings.size / 2.0) / 1024.0;
-      materialRef.current.uniforms.uCursor.value.copy(cursorUV.current);
       materialRef.current.uniforms.uBrushSize.value = uvRadius;
       materialRef.current.uniforms.uShowCursor.value = showCursor ? 1.0 : 0.0;
       materialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : (projectionType === 'planar' ? 2.0 : 0.0);
@@ -140,22 +152,21 @@ const SceneContent: React.FC<SceneContentProps> = ({
       materialRef.current.uniformsNeedUpdate = true;
     }
     if (arrowMaterialRef.current) {
-      if (materialRef.current?.uniforms.uFlowMap.value.needsUpdate) {
-        arrowMaterialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
-      }
       arrowMaterialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : (projectionType === 'planar' ? 2.0 : 0.0);
       arrowMaterialRef.current.uniforms.uPolarAngle.value = THREE.MathUtils.degToRad(polarAngle);
       
-      // Update Grid Size based on density
-      // For Planar: X = density, Y = density / aspect
-      // For Sphere: X = density, Y = density / 2
       const x = arrowDensity;
       const y = projectionType === 'planar' ? Math.round(x / planeAspect) : Math.round(x / 2);
       arrowMaterialRef.current.uniforms.uGridSize.value.set(x, y);
 
       arrowMaterialRef.current.uniformsNeedUpdate = true;
     }
-  });
+  }, [brushSettings.size, showCursor, projectionType, polarAngle, showFlowMap, arrowDensity, planeAspect]);
+
+  // Special handling for cursor UV as it changes on mouse move but doesn't need a full uniform update loop if not painting
+  // However, cursor is tracked via ref cursorUV.current and updated in useFrame normally.
+  // Actually, cursor position SHOULD be in useFrame if we want smooth cursor movement in 3D.
+  // Let's keep uCursor in useFrame.
 
   // Load Sky Texture
   useEffect(() => {
