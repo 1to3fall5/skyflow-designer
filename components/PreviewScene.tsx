@@ -238,6 +238,12 @@ const SceneContent: React.FC<SceneContentProps> = ({
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
     if (e.button !== 0) return;
     e.stopPropagation(); 
+    try {
+        gl.domElement.setPointerCapture(e.pointerId);
+    } catch (err) {
+        // Ignore InvalidStateError if pointer is already released or invalid
+        console.warn('Failed to capture pointer:', err);
+    }
     
     if (e.uv) {
         const transformed = getTransformedUV(e.uv);
@@ -255,6 +261,11 @@ const SceneContent: React.FC<SceneContentProps> = ({
   };
 
   const handlePointerUp = (e: ThreeEvent<PointerEvent>) => {
+    try {
+        gl.domElement.releasePointerCapture(e.pointerId);
+    } catch (err) {
+        // Ignore errors if pointer was not captured
+    }
     if (isDragging.current) {
         if (onPaintEnd) onPaintEnd();
     }
@@ -380,6 +391,7 @@ const UEControls = ({
   const isFKeyPressed = useRef(false);
   const hasResizedBrush = useRef(false);
   const fKeyAccumulatedMovement = useRef(0);
+  const ignoreNextMove = useRef(false);
   const currentBrushSizeRef = useRef(currentBrushSize);
 
   // Keep ref in sync
@@ -412,6 +424,7 @@ const UEControls = ({
             isFKeyPressed.current = true;
             hasResizedBrush.current = false;
             fKeyAccumulatedMovement.current = 0;
+            ignoreNextMove.current = true;
             // Lock pointer to prevent cursor movement during potential resize
             gl.domElement.requestPointerLock();
         }
@@ -428,7 +441,9 @@ const UEControls = ({
         document.exitPointerLock();
         
         // Only trigger reset if we didn't resize the brush (and exceeded threshold)
-        if (!hasResizedBrush.current) {
+        // Reset Logic: If F key was pressed and released without significant mouse movement
+        if (!hasResizedBrush.current && fKeyAccumulatedMovement.current < 20) {
+            console.log('F key release detected as TAP (Reset Camera)', { accumulated: fKeyAccumulatedMovement.current });
             if (projectionType === 'planar') {
               // Reset to view the plane from a perspective angle
               camera.position.set(0, 0, 10);
@@ -464,10 +479,18 @@ const UEControls = ({
     const handleMouseMove = (e: MouseEvent) => {
       // Handle Brush Resize
       if (isFKeyPressed.current && onSetBrushSize) {
+          if (ignoreNextMove.current) {
+              ignoreNextMove.current = false;
+              return;
+          }
+          
           fKeyAccumulatedMovement.current += Math.abs(e.movementX) + Math.abs(e.movementY);
           
+          // Debug F key movement
+          // console.log('F key active - movement:', { x: e.movementX, y: e.movementY, total: fKeyAccumulatedMovement.current });
+          
           // Threshold to prevent accidental resize when just clicking F for reset
-          if (fKeyAccumulatedMovement.current > 5 || hasResizedBrush.current) {
+          if (fKeyAccumulatedMovement.current > 20 || hasResizedBrush.current) {
               hasResizedBrush.current = true;
               const delta = e.movementX;
               // Adjust sensitivity and clamp

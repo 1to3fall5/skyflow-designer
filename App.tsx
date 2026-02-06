@@ -6,6 +6,7 @@ import {
   Image as ImageIcon, 
   Eraser, 
   Eye,
+  EyeOff,
   Compass,
   Droplets,
   Globe,
@@ -14,11 +15,128 @@ import {
   ArrowRightLeft,
   Wand2,
   Trash2,
-  RefreshCw
+  RefreshCw,
+  Pencil,
+  Plus,
+  Minus,
+  Shield,
+  ShieldOff,
+  ArrowUp,
+  ArrowDown,
+  GripVertical
 } from 'lucide-react';
 import FlowPainter from './components/FlowPainter';
 import PreviewScene from './components/PreviewScene';
-import { BrushSettings, ViewMode, ActiveTool, FlowPainterHandle, ProjectionType } from './types';
+import { BrushSettings, ViewMode, ActiveTool, FlowPainterHandle, ProjectionType, Layer } from './types';
+
+  import {
+  DndContext, 
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable
+} from '@dnd-kit/sortable';
+import {CSS} from '@dnd-kit/utilities';
+
+const SortableLayerItem = ({ 
+    layer, 
+    activeLayerId, 
+    setActiveLayerId, 
+    updateLayer, 
+    removeLayer 
+}: {
+    layer: Layer,
+    activeLayerId: string,
+    setActiveLayerId: (id: string) => void,
+    updateLayer: (id: string, updates: Partial<Layer>) => void,
+    removeLayer: (id: string) => void
+}) => {
+    const {
+        attributes,
+        listeners,
+        setNodeRef,
+        transform,
+        transition,
+        isDragging
+    } = useSortable({ id: layer.id });
+
+    const style = {
+        transform: CSS.Translate.toString(transform),
+        transition,
+        zIndex: isDragging ? 10 : 1,
+        opacity: isDragging ? 0.5 : 1
+    };
+
+    return (
+        <div 
+            ref={setNodeRef} 
+            style={style} 
+            className={`group rounded-xl border transition-colors duration-200 mb-2 ${
+                activeLayerId === layer.id 
+                ? 'p-3 bg-[#212124] border-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.15)] ring-1 ring-indigo-500/30' 
+                : 'px-3 py-2 bg-[#1f1f23] border-[#2d2d33] hover:border-[#3d3d45]'
+            }`}
+            onClick={() => setActiveLayerId(layer.id)}
+        >
+            <div className="flex items-center gap-3">
+                <div 
+                    {...attributes} 
+                    {...listeners}
+                    className="text-slate-600 hover:text-slate-400 cursor-grab active:cursor-grabbing"
+                >
+                    <GripVertical className="w-4 h-4" />
+                </div>
+
+                <div className="flex-1 min-w-0">
+                    <div className="text-xs font-medium text-slate-200 truncate select-none">{layer.name}</div>
+                </div>
+
+                <div className="flex items-center gap-1">
+                    <button
+                    onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { isObstacle: !layer.isObstacle }); }}
+                    className={`p-1.5 rounded-md transition-colors ${layer.isObstacle ? 'bg-rose-500/20 text-rose-400' : 'text-slate-600 hover:text-slate-400 hover:bg-[#2d2d33]'}`}
+                    title={layer.isObstacle ? "障碍物图层 (点击切换)" : "设为障碍物 (点击切换)"}
+                    >
+                        {layer.isObstacle ? <Shield className="w-3.5 h-3.5" /> : <ShieldOff className="w-3.5 h-3.5" />}
+                    </button>
+
+                    <button
+                    onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { visible: !layer.visible }); }}
+                    className={`p-1.5 rounded-md transition-colors ${layer.visible ? 'text-slate-300 hover:text-white' : 'text-slate-600 hover:text-slate-400'}`}
+                    title={layer.visible ? "隐藏图层" : "显示图层"}
+                    >
+                        {layer.visible ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                    </button>
+                </div>
+            </div>
+            
+            {/* Layer Settings (Blur) */}
+            <div className={`space-y-2 overflow-hidden transition-all duration-200 ${activeLayerId === layer.id ? 'mt-3 max-h-20 opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
+            <div className="h-px bg-[#2d2d33] w-full"></div>
+            <div className="flex items-center gap-3 pt-1">
+                <span className="text-[10px] text-slate-500 font-bold uppercase">模糊</span>
+                <input 
+                    type="range" min="0" max="32"
+                    value={layer.blur}
+                    onChange={(e) => updateLayer(layer.id, { blur: Number(e.target.value) })}
+                    className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                    onPointerDown={(e) => e.stopPropagation()} // Prevent drag start on slider
+                />
+                <span className="text-[10px] font-mono text-indigo-400 w-6 text-right">{layer.blur}</span>
+            </div>
+            </div>
+        </div>
+    );
+};
 
 const App: React.FC = () => {
   // State
@@ -41,22 +159,14 @@ const App: React.FC = () => {
   const [windDirection, setWindDirection] = useState(45); // Default 45 to show movement
   const [windTrigger, setWindTrigger] = useState(0);
   const [resetTrigger, setResetTrigger] = useState(0);
-
-  // Triggers for clearing layers
-  const [clearBrushTrigger, setClearBrushTrigger] = useState(0);
-  const [clearGlobalTrigger, setClearGlobalTrigger] = useState(0);
-  const [clearObstacleTrigger, setClearObstacleTrigger] = useState(0);
-  
-  // Layer Settings
-  const [globalBlur, setGlobalBlur] = useState(0);
-  const [obstacleBlur, setObstacleBlur] = useState(0);
-  const [brushBlur, setBrushBlur] = useState(0);
-  
-  // Layer Visibility
   const [globalLayerVisible, setGlobalLayerVisible] = useState(true);
-  const [obstacleLayerVisible, setObstacleLayerVisible] = useState(true);
-  const [brushLayerVisible, setBrushLayerVisible] = useState(true);
-  
+
+  // Layer System State
+  const [layers, setLayers] = useState<Layer[]>([
+    { id: 'layer-1', name: 'Layer 1', visible: true, isObstacle: false, blur: 0, opacity: 1 }
+  ]);
+  const [activeLayerId, setActiveLayerId] = useState('layer-1');
+
   // Magic Wand Settings
   const [magicWandThreshold, setMagicWandThreshold] = useState(20);
   const [showMaskOverlay, setShowMaskOverlay] = useState(false);
@@ -65,9 +175,6 @@ const App: React.FC = () => {
   const [flowVersion, setFlowVersion] = useState(0);
 
   // Export Settings
-  // Based on user feedback: "invertX=true" was 180 degrees off.
-  // Current state (-x, y) rotated 180 deg is (x, -y).
-  // So we default to invertX=false, invertY=true.
   const [invertX, setInvertX] = useState(false);
   const [invertY, setInvertY] = useState(true);
 
@@ -82,20 +189,18 @@ const App: React.FC = () => {
   const flowPainterRef = useRef<FlowPainterHandle>(null);
   const isRightMouseDown = useRef(false);
 
-  const handleClearBrush = () => {
-      setClearBrushTrigger(prev => prev + 1);
-  };
-
-  const handleClearGlobal = () => {
-      setClearGlobalTrigger(prev => prev + 1);
-  };
-
   const handleRegenerateGlobal = () => {
       setWindTrigger(prev => prev + 1);
   };
 
-  const handleClearObstacle = () => {
-      setClearObstacleTrigger(prev => prev + 1);
+  const handleClearGlobal = () => {
+      // We use resetTrigger for global clear in FlowPainter for now, or we can assume clearing Global Layer
+      // is just resetting it to neutral. FlowPainter handles this via windTrigger if we reset params?
+      // Actually, FlowPainter had a clearGlobalTrigger. I removed it.
+      // But we can use `windTrigger` to regenerate.
+      // Or we can add a specific clear function.
+      // For now, let's just regenerate which effectively clears/resets the base wind.
+      setWindTrigger(prev => prev + 1);
   };
 
   // Callback when FlowPainter finishes expensive operations like Wind or Reset
@@ -119,6 +224,37 @@ const App: React.FC = () => {
         flowPainterRef.current.saveHistory();
     }
   }, []);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+        activationConstraint: {
+            distance: 5, // Require slight movement to start drag
+        },
+    }),
+    useSensor(KeyboardSensor, {
+        coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const {active, over} = event;
+    
+    if (over && active.id !== over.id) {
+      setLayers((items) => {
+          // items is in Render Order (Bottom -> Top)
+          // We need to simulate the reordering on the REVERSED list (Visual Order: Top -> Bottom)
+          const visualList = [...items].reverse();
+          
+          const oldIndex = visualList.findIndex(item => item.id === active.id);
+          const newIndex = visualList.findIndex(item => item.id === over.id);
+          
+          const newVisualList = arrayMove(visualList, oldIndex, newIndex);
+          
+          // Reverse back to get Render Order
+          return newVisualList.reverse();
+      });
+    }
+  };
 
   // Handlers
   const handleTextureUpdate = useCallback((canvas: HTMLCanvasElement) => {
@@ -147,12 +283,9 @@ const App: React.FC = () => {
         const imageData = ctx.getImageData(0, 0, exportCanvas.width, exportCanvas.height);
         const data = imageData.data;
         
-        // Invert channels based on settings
-        // 0 -> 255, 255 -> 0, 128 -> 127
         for (let i = 0; i < data.length; i += 4) {
             if (invertX) data[i] = 255 - data[i];     // R (U)
             if (invertY) data[i + 1] = 255 - data[i + 1]; // G (V)
-            // B and A remain untouched
         }
         
         ctx.putImageData(imageData, 0, 0);
@@ -170,6 +303,36 @@ const App: React.FC = () => {
       const url = URL.createObjectURL(file);
       setSkyTextureUrl(url);
     }
+  };
+
+  // Layer Management
+  const addLayer = () => {
+      const newId = `layer-${Date.now()}`;
+      const newLayer: Layer = {
+          id: newId,
+          name: `Layer ${layers.length + 1}`,
+          visible: true,
+          isObstacle: false,
+          blur: 0,
+          opacity: 1
+      };
+      setLayers(prev => [...prev, newLayer]);
+      // setActiveLayerId(newId); // Don't auto-activate new layers
+  };
+
+  const removeLayer = (id: string) => {
+      if (layers.length <= 1) return; // Prevent deleting last layer
+      const newLayers = layers.filter(l => l.id !== id);
+      setLayers(newLayers);
+      if (activeLayerId === id) {
+          setActiveLayerId(newLayers[newLayers.length - 1].id);
+      }
+      // Also clear content in FlowPainter
+      flowPainterRef.current?.clearLayer(id);
+  };
+
+  const updateLayer = (id: string, updates: Partial<Layer>) => {
+      setLayers(prev => prev.map(l => l.id === id ? { ...l, ...updates } : l));
   };
 
   // Focus container on mount
@@ -194,7 +357,6 @@ const App: React.FC = () => {
         return;
       }
 
-      // If right mouse button is held (e.g. for camera movement), ignore tool shortcuts
       if (isRightMouseDown.current) return;
 
       const key = e.key.toLowerCase();
@@ -202,7 +364,6 @@ const App: React.FC = () => {
       // Undo/Redo
       if ((e.ctrlKey || e.metaKey) && key === 'z') {
         e.preventDefault();
-        console.log('[App] Undo/Redo triggered');
         if (e.shiftKey) {
           flowPainterRef.current?.redo();
         } else {
@@ -212,7 +373,6 @@ const App: React.FC = () => {
       }
       if ((e.ctrlKey || e.metaKey) && key === 'y') {
         e.preventDefault();
-        console.log('[App] Redo triggered (Ctrl+Y)');
         flowPainterRef.current?.redo();
         return;
       }
@@ -251,77 +411,90 @@ const App: React.FC = () => {
     };
   }, [activeTool]);
 
+  const Switch = ({ checked, onChange, color = 'bg-indigo-600' }: { checked: boolean, onChange: (val: boolean) => void, color?: string }) => (
+     <button 
+       onClick={() => onChange(!checked)}
+       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-all duration-300 focus:outline-none hover:brightness-110 active:scale-95 ${checked ? color : 'bg-[#2d2d33]'}`}
+     >
+       <span 
+         className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-300 ease-in-out ${checked ? 'translate-x-[22px]' : 'translate-x-[2px]'}`} 
+       />
+     </button>
+   );
+
   return (
     <div 
       ref={containerRef}
       tabIndex={0}
-      className="flex flex-col h-screen bg-slate-900 text-slate-100 outline-none"
+      className="flex flex-col h-screen bg-[#0f0f12] text-slate-100 outline-none font-sans"
     >
       {/* Header */}
-      <header className="flex items-center justify-between px-6 py-4 bg-slate-800 border-b border-slate-700 shadow-lg z-10">
+      <header className="flex items-center justify-between px-6 py-3 bg-[#16161a] border-b border-[#252529] z-10">
         <div className="flex items-center gap-3">
-          <Wind className="w-6 h-6 text-sky-400" />
-          <h1 className="text-xl font-bold bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent">
-            SkyFlow 设计器
+          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <Wind className="w-5 h-5 text-white" />
+          </div>
+          <h1 className="text-lg font-bold tracking-tight text-white">
+            SkyFlow <span className="text-indigo-400">Designer</span>
           </h1>
         </div>
         
         <div className="flex items-center gap-4">
-          <div className="flex bg-slate-700 rounded-lg p-1">
+          <div className="flex bg-[#1f1f23] rounded-lg p-1 border border-[#2d2d33]">
              <button 
               onClick={() => setViewMode('2d')}
-              className={`p-2 rounded ${viewMode === '2d' ? 'bg-slate-600 shadow' : 'hover:bg-slate-600/50'}`}
+              className={`p-2 rounded-md transition-all ${viewMode === '2d' ? 'bg-[#2d2d33] text-indigo-400 shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-[#252529]'}`}
               title="仅 2D 绘制"
             >
               <Palette className="w-4 h-4" />
             </button>
             <button 
               onClick={() => setViewMode('split')}
-              className={`p-2 rounded ${viewMode === 'split' ? 'bg-slate-600 shadow' : 'hover:bg-slate-600/50'}`}
+              className={`p-2 rounded-md transition-all ${viewMode === 'split' ? 'bg-[#2d2d33] text-indigo-400 shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-[#252529]'}`}
               title="分屏视图"
             >
               <Columns className="w-4 h-4" />
             </button>
             <button 
               onClick={() => setViewMode('3d')}
-              className={`p-2 rounded ${viewMode === '3d' ? 'bg-slate-600 shadow' : 'hover:bg-slate-600/50'}`}
+              className={`p-2 rounded-md transition-all ${viewMode === '3d' ? 'bg-[#2d2d33] text-indigo-400 shadow-sm' : 'text-slate-400 hover:text-slate-200 hover:bg-[#252529]'}`}
               title="仅 3D 预览"
             >
               <Globe className="w-4 h-4" />
             </button>
           </div>
           
-          <div className="h-6 w-px bg-slate-700 mx-2"></div>
+          <div className="h-6 w-px bg-[#2d2d33] mx-1"></div>
 
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3 bg-slate-700/50 px-3 py-1.5 rounded-lg border border-slate-600">
-              <span className="text-xs text-slate-400 font-medium">导出设置:</span>
-              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer hover:text-white transition-colors">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 bg-[#1f1f23] px-3 py-1.5 rounded-lg border border-[#2d2d33]">
+              <span className="text-[11px] text-slate-500 font-bold uppercase tracking-wider">导出:</span>
+              <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={invertX}
                   onChange={(e) => setInvertX(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded bg-slate-600 border-slate-500 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-800"
+                  className="w-3.5 h-3.5 rounded bg-[#2d2d33] border-[#3d3d45] text-indigo-500 focus:ring-indigo-500 focus:ring-offset-[#16161a]"
                 />
-                <span title="反转红色通道 (X轴)">反转X</span>
+                <span title="反转红色通道 (X轴)">R</span>
               </label>
-              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer hover:text-white transition-colors">
+              <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer hover:text-white transition-colors">
                 <input 
                   type="checkbox" 
                   checked={invertY}
                   onChange={(e) => setInvertY(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded bg-slate-600 border-slate-500 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-slate-800"
+                  className="w-3.5 h-3.5 rounded bg-[#2d2d33] border-[#3d3d45] text-indigo-500 focus:ring-indigo-500 focus:ring-offset-[#16161a]"
                 />
-                <span title="反转绿色通道 (Y轴)">反转Y</span>
+                <span title="反转绿色通道 (Y轴)">G</span>
               </label>
             </div>
 
             <button 
               onClick={handleExport}
-              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg font-medium transition-colors shadow-lg shadow-indigo-500/20"
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-lg shadow-indigo-600/20 active:scale-95"
             >
               <Download className="w-4 h-4" />
-              导出贴图
+              导出
             </button>
           </div>
         </div>
@@ -329,347 +502,278 @@ const App: React.FC = () => {
 
       <main className="flex-1 flex overflow-hidden">
         {/* Sidebar Controls */}
-        <aside className="w-80 bg-slate-800 border-r border-slate-700 overflow-y-auto p-4 flex flex-col gap-6 z-10 shadow-xl">
+        <aside className="w-[320px] bg-[#18181b] border-r border-[#252529] overflow-y-auto p-5 flex flex-col gap-6 z-10 custom-scrollbar">
           
           {/* Section: Texture Generation */}
-          <section className="space-y-3">
-            <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-              <ImageIcon className="w-4 h-4" /> 天空贴图
+          <section className="space-y-4">
+            <h2 className="text-sm font-bold text-white flex items-center gap-2 relative pl-3">
+              <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3.5 bg-indigo-500 rounded-full"></span>
+              1. 图片源
             </h2>
             
-            <div className="relative">
+            <div className="relative group">
               <input 
                   type="file" 
                   accept="image/*"
                   onChange={handleFileUpload}
                   className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
               />
-              <div className="w-full bg-slate-700 hover:bg-slate-600 text-slate-300 py-3 rounded-lg border border-slate-600 text-center transition-colors flex flex-col items-center justify-center gap-1">
-                <span className="text-sm font-medium text-sky-400">选择图片文件</span>
-                <span className="text-xs text-slate-500">支持 JPG, PNG</span>
+              <div className="w-full aspect-[16/9] bg-[#212124] hover:bg-[#252529] text-slate-400 rounded-xl border-2 border-dashed border-[#323238] group-hover:border-indigo-500/50 transition-all flex flex-col items-center justify-center gap-3">
+                <div className="w-10 h-10 bg-[#2d2d33] rounded-lg flex items-center justify-center group-hover:bg-indigo-500/10 transition-colors">
+                    <ImageIcon className="w-5 h-5 text-slate-500 group-hover:text-indigo-400" />
+                </div>
+                <div className="text-center">
+                    <p className="text-xs font-medium text-slate-300">点击 / 拖拽 / <span className="bg-[#2d2d33] px-1 rounded text-[10px]">Ctrl+V</span></p>
+                    <p className="text-[10px] text-slate-500 mt-1">上传图片 (支持 PNG/TGA)</p>
+                </div>
               </div>
             </div>
 
             {/* Projection Toggle */}
-            <div className="bg-slate-900/50 p-2 rounded-lg border border-slate-700 space-y-3">
-               <div className="flex text-xs font-medium">
+            <div className="bg-[#1f1f23] p-1.5 rounded-xl border border-[#2d2d33] space-y-3">
+               <div className="flex p-1 gap-1">
                    <button 
                     onClick={() => setProjectionType('equirectangular')}
-                    className={`flex-1 py-1.5 rounded flex items-center justify-center gap-1 transition-all ${projectionType === 'equirectangular' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${projectionType === 'equirectangular' ? 'bg-[#2d2d33] text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}
                    >
-                     <Globe className="w-3 h-3" /> 球面
+                     <Globe className="w-3.5 h-3.5" /> 球面
                    </button>
                    <button 
                     onClick={() => setProjectionType('polar')}
-                    className={`flex-1 py-1.5 rounded flex items-center justify-center gap-1 transition-all ${projectionType === 'polar' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${projectionType === 'polar' ? 'bg-[#2d2d33] text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}
                    >
-                     <div className="w-3 h-3 rounded-full border-2 border-current"></div> 极坐标
+                     <div className="w-3.5 h-3.5 rounded-full border-2 border-current"></div> 极坐标
                    </button>
                    <button 
                     onClick={() => setProjectionType('planar')}
-                    className={`flex-1 py-1.5 rounded flex items-center justify-center gap-1 transition-all ${projectionType === 'planar' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-slate-200'}`}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${projectionType === 'planar' ? 'bg-[#2d2d33] text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}
                    >
-                     <div className="w-3 h-3 border border-current"></div> 平面
+                     <div className="w-3.5 h-3.5 border-2 border-current"></div> 平面
                    </button>
                </div>
                
                {projectionType === 'polar' && (
-                   <div className="space-y-1 animate-in fade-in slide-in-from-top-1 duration-200">
-                      <div className="flex justify-between text-xs text-slate-400">
-                        <span>地平线角度</span>
-                        <span>{polarAngle}°</span>
+                   <div className="px-3 pb-3 space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">地平线角度</span>
+                        <span className="text-xs font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded">{polarAngle}°</span>
                       </div>
                       <input 
                         type="range" min="45" max="180" 
                         value={polarAngle}
                         onChange={(e) => setPolarAngle(Number(e.target.value))}
-                        className="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                        title="调整极坐标贴图覆盖球面的范围。90° = 半球，180° = 全球。"
+                        className="w-full h-1 bg-[#2d2d33] rounded-lg appearance-none cursor-pointer accent-indigo-500"
                       />
-                      <div className="flex justify-between text-[10px] text-slate-500 px-0.5">
-                          <span>半球</span>
-                          <span>全球</span>
-                      </div>
                    </div>
                )}
             </div>
           </section>
 
-          <hr className="border-slate-700" />
-          
           {/* Section: Layer 1 - Global Flow */}
-          <section className="space-y-3">
-             <div className="flex items-center justify-between">
-               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Compass className="w-4 h-4" /> 全局方向
+          <section className="flex flex-col">
+             <div className="flex items-center justify-between relative pl-3">
+               <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3.5 bg-indigo-500 rounded-full"></span>
+               <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                2. 全局风向 (背景)
                </h2>
                <div className="flex items-center gap-2">
-                   <button 
-                       onClick={handleRegenerateGlobal}
-                       className="text-slate-500 hover:text-indigo-500 transition-colors"
-                       title="重新生成全局方向"
-                   >
-                       <RefreshCw className="w-4 h-4" />
-                   </button>
-                   <button 
-                       onClick={handleClearGlobal}
-                       className="text-slate-500 hover:text-rose-500 transition-colors"
-                       title="重置全局方向层"
-                   >
-                       <Trash2 className="w-4 h-4" />
-                   </button>
-                   <button 
-                     onClick={() => setGlobalLayerVisible(!globalLayerVisible)}
-                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${globalLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                     title={globalLayerVisible ? "隐藏图层" : "显示图层"}
-                   >
-                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${globalLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
-                   </button>
+                   <Switch 
+                     checked={globalLayerVisible}
+                     onChange={setGlobalLayerVisible}
+                   />
                </div>
              </div>
-            <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${globalLayerVisible ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
-              <div className="overflow-hidden">
-                <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
-                <div className="flex justify-between text-xs text-slate-400 mb-1">
-                  <span>方向角度</span>
-                  <span>{windDirection}°</span>
-                </div>
-                <div className="flex gap-2 items-center">
-                    <input 
-                      type="range" min="0" max="360"
-                      value={windDirection}
-                      onChange={(e) => setWindDirection(Number(e.target.value))}
-                      className="flex-1 h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-teal-500"
-                    />
-                </div>
-                
-                <div className="space-y-2">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 全局模糊</span>
-                      <span>{globalBlur}px</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="32"
-                      value={globalBlur}
-                      onChange={(e) => setGlobalBlur(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                </div>
-              </div>
-            </div>
-          </div>
-          </section>
-
-          <hr className="border-slate-700" />
-
-          {/* Section: Layer 2 - Obstacles */}
-          <section className="space-y-3">
-             <div className="flex items-center justify-between">
-               <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                <Eraser className="w-4 h-4" /> 障碍物 (遮罩)
-               </h2>
-               <div className="flex items-center gap-2">
-                   <button 
-                       onClick={handleClearObstacle}
-                       className="text-slate-500 hover:text-rose-500 transition-colors"
-                       title="清空障碍物层"
-                   >
-                       <Trash2 className="w-4 h-4" />
-                   </button>
-                   <button 
-                     onClick={() => setObstacleLayerVisible(!obstacleLayerVisible)}
-                     className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${obstacleLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                     title={obstacleLayerVisible ? "隐藏图层" : "显示图层"}
-                   >
-                     <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${obstacleLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
-                   </button>
-               </div>
-             </div>
-            <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-in-out ${obstacleLayerVisible ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
-              <div className="overflow-hidden">
-                <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      setActiveTool('obstacle');
-                      setBrushSettings(p => ({ ...p, isEraser: false }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle' ? 'bg-amber-600 border-amber-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                  >
-                     绘制障碍
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTool('obstacle_eraser');
-                      setBrushSettings(p => ({ ...p, isEraser: true }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'obstacle_eraser' ? 'bg-amber-800 border-amber-700 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                  >
-                     擦除障碍
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTool('magic_wand');
-                      setBrushSettings(p => ({ ...p, isEraser: false }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'magic_wand' ? 'bg-purple-600 border-purple-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                    title="魔棒工具 (快速选择障碍物)"
-                  >
-                     <Wand2 className="w-3 h-3" />
-                  </button>
-                </div>
-
-                {activeTool === 'magic_wand' && (
-                  <div className="space-y-2 pt-1 border-t border-slate-700/50">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>魔棒容差</span>
-                      <span>{magicWandThreshold}</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100"
-                      value={magicWandThreshold}
-                      onChange={(e) => setMagicWandThreshold(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-purple-500"
-                    />
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between pt-1">
-                   <span className="text-xs text-slate-400">显示红色遮罩</span>
-                   <button 
-                     onClick={() => {
-                       console.log('[App] Toggling Red Mask to:', !showMaskOverlay);
-                       setShowMaskOverlay(!showMaskOverlay);
-                     }}
-                     className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${showMaskOverlay ? 'bg-red-600' : 'bg-slate-700'}`}
-                   >
-                     <span className={`inline-block h-2 w-2 transform rounded-full bg-white transition-transform ${showMaskOverlay ? 'translate-x-4' : 'translate-x-1'}`} />
-                   </button>
-                </div>
-
-                <div className="space-y-2">
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 障碍物边缘模糊</span>
-                      <span>{obstacleBlur}px</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="32"
-                      value={obstacleBlur}
-                      onChange={(e) => setObstacleBlur(Number(e.target.value))}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
-                    />
-                </div>
-              </div>
-            </div>
-          </div>
-          </section>
-
-          <hr className="border-slate-700" />
-          
-          {/* Section: Layer 3 - Free Brush (Moved to Top) */}
-          <section className="space-y-3">
-             <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
-                    <Palette className="w-4 h-4" /> 自由笔刷
-                </h2>
-                <div className="flex items-center gap-2">
-                     <button 
-                         onClick={handleClearBrush}
-                         className="text-slate-500 hover:text-rose-500 transition-colors"
-                         title="清空自由笔刷层"
-                     >
-                         <Trash2 className="w-4 h-4" />
-                     </button>
-                     <button 
-                         onClick={() => setBrushLayerVisible(!brushLayerVisible)}
-                         className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${brushLayerVisible ? 'bg-indigo-600' : 'bg-slate-700'}`}
-                         title={brushLayerVisible ? "隐藏图层" : "显示图层"}
-                     >
-                         <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${brushLayerVisible ? 'translate-x-5' : 'translate-x-1'}`} />
-                     </button>
-                </div>
-             </div>
-            
-            {brushLayerVisible && (
-            <div className="space-y-3 p-3 bg-slate-900/50 rounded-lg border border-slate-700">
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      setActiveTool('brush');
-                      setBrushSettings(p => ({ ...p, isEraser: false }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border ${activeTool === 'brush' ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                    title="Shortcut: B"
-                  >
-                    画笔 <span className="text-xs opacity-50 ml-1">(B)</span>
-                  </button>
-                  <button
-                    onClick={() => {
-                      setActiveTool('eraser');
-                      setBrushSettings(p => ({ ...p, isEraser: true }));
-                    }}
-                    className={`flex-1 py-2 text-sm rounded-md border flex items-center justify-center gap-2 ${activeTool === 'eraser' ? 'bg-rose-600 border-rose-500 text-white' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                    title="Shortcut: E"
-                  >
-                    <Eraser className="w-3 h-3" /> <span className="text-xs opacity-50 ml-1">(E)</span>
-                  </button>
-                </div>
-
+            <div className={`transition-all duration-300 overflow-hidden ${globalLayerVisible ? 'max-h-[500px] opacity-100 mt-4' : 'max-h-0 opacity-0'}`}>
+              <div className="space-y-4 p-4 bg-[#212124] rounded-xl border border-[#2d2d33]">
                 <div className="space-y-3">
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>画笔大小</span>
-                      <span>{brushSettings.size}px</span>
-                    </div>
-                    <input 
-                      type="range" min="1" max="100" 
-                      value={brushSettings.size}
-                      onChange={(e) => setBrushSettings({...brushSettings, size: Number(e.target.value)})}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
+                  <div className="flex justify-between items-center">
+                    <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">方向角度</span>
+                    <span className="text-xs font-mono text-indigo-400">{windDirection}°</span>
                   </div>
-
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>硬度</span>
-                      <span>{Math.round(brushSettings.hardness * 100)}%</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="1" step="0.05"
-                      value={brushSettings.hardness}
-                      onChange={(e) => setBrushSettings({...brushSettings, hardness: Number(e.target.value)})}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                  </div>
-                  
-                  <div>
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>流动强度</span>
-                      <span>{Math.round(brushSettings.strength * 100)}%</span>
-                    </div>
-                    <input 
-                      type="range" min="0.1" max="1" step="0.1"
-                      value={brushSettings.strength}
-                      onChange={(e) => setBrushSettings({...brushSettings, strength: Number(e.target.value)})}
-                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                    />
-                  </div>
-
-                   <div className="space-y-2 pt-2 border-t border-slate-700/50">
-                        <div className="flex justify-between text-xs text-slate-400 mb-1">
-                          <span className="flex items-center gap-1"><Droplets className="w-3 h-3" /> 笔刷层模糊</span>
-                          <span>{brushBlur}px</span>
-                        </div>
-                        <input 
-                          type="range" min="0" max="32"
-                          value={brushBlur}
-                          onChange={(e) => setBrushBlur(Number(e.target.value))}
-                          className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                        />
-                    </div>
+                  <input 
+                    type="range" min="0" max="360"
+                    value={windDirection}
+                    onChange={(e) => setWindDirection(Number(e.target.value))}
+                    className="w-full h-1.5 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                  />
                 </div>
+              </div>
             </div>
-            )}
+          </section>
+
+          {/* Section: Layers Panel */}
+          <section className="flex flex-col flex-1 min-h-0">
+             <div className="flex items-center justify-between relative pl-3 mb-4">
+               <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3.5 bg-indigo-500 rounded-full"></span>
+               <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                3. 图层管理
+               </h2>
+               <div className="flex items-center gap-1">
+                   <button 
+                       onClick={() => removeLayer(activeLayerId)}
+                       className="p-1.5 bg-[#2d2d33] text-slate-400 hover:text-white hover:bg-rose-600 rounded-md transition-all"
+                       title="删除当前图层"
+                   >
+                       <Minus className="w-3.5 h-3.5" />
+                   </button>
+                   <button 
+                       onClick={addLayer}
+                       className="p-1.5 bg-[#2d2d33] text-indigo-400 hover:text-white hover:bg-indigo-600 rounded-md transition-all"
+                       title="新建图层"
+                   >
+                       <Plus className="w-3.5 h-3.5" />
+                   </button>
+               </div>
+             </div>
+             
+             <div className="flex-1 overflow-y-auto custom-scrollbar space-y-2 pr-1">
+                 {/* Dnd Context for Layer Reordering */}
+                 <DndContext 
+                    sensors={sensors}
+                    collisionDetection={closestCenter}
+                    onDragEnd={handleDragEnd}
+                 >
+                    {/* 
+                        We need to provide the list in the visual order (Top to Bottom).
+                        Our `layers` state is Bottom to Top (Render Order).
+                        So we reverse it for the UI.
+                        
+                        Wait, if we just reverse in the map, dnd-kit might get confused if we don't sync the indices.
+                        Actually, dnd-kit relies on IDs.
+                        
+                        BUT: If we use `arrayMove` on the original `layers` array based on IDs,
+                        and the UI displays `layers.slice().reverse()`,
+                        
+                        Example:
+                        Layers (Render Order): [A, B, C]  (C is Top)
+                        UI (Visual Order): [C, B, A]
+                        
+                        User drags C to below B.
+                        Target Visual Order: [B, C, A]
+                        Target Render Order: [A, C, B]
+                        
+                        If I use dnd-kit on the `layers` array directly (Render Order),
+                        I should probably just render them in that order in the UI but using flex-col-reverse?
+                        No, that messes up scrolling sometimes.
+                        
+                        Let's just use a derived variable for the SortableContext items.
+                        We will sort the ACTUAL `layers` array (Render Order) but Display them Reversed?
+                        No, Drag and Drop expects the DOM order to match the items order.
+                        
+                        So, we MUST pass the REVERSED array to SortableContext.
+                        And in onDragEnd, we take the result (which is a reordered Reversed array),
+                        and Reverse it BACK to get the new Render Order.
+                    */}
+                    <SortableContext 
+                        items={[...layers].reverse()}
+                        strategy={verticalListSortingStrategy}
+                    >
+                        {[...layers].reverse().map((layer) => (
+                            <SortableLayerItem 
+                                key={layer.id} 
+                                layer={layer}
+                                activeLayerId={activeLayerId}
+                                setActiveLayerId={setActiveLayerId}
+                                updateLayer={updateLayer}
+                                removeLayer={removeLayer}
+                            />
+                        ))}
+                    </SortableContext>
+                 </DndContext>
+             </div>
+          </section>
+
+          {/* Section: Tool Settings */}
+          <section className="flex flex-col mt-4">
+             <div className="flex items-center justify-between relative pl-3 mb-4">
+               <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3.5 bg-indigo-500 rounded-full"></span>
+               <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                4. 工具设置
+               </h2>
+             </div>
+
+             <div className="space-y-4 p-4 bg-[#212124] rounded-xl border border-[#2d2d33]">
+                <div className="flex gap-2">
+                    <button 
+                      onClick={() => {
+                        setActiveTool('brush');
+                        setBrushSettings(prev => ({ ...prev, isEraser: false }));
+                      }}
+                      className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all ${activeTool === 'brush' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-[#323238] text-slate-400 hover:text-slate-200 border border-[#3d3d45]'}`}
+                    >
+                      <Pencil className="w-3.5 h-3.5" /> 画笔
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setActiveTool('eraser');
+                        setBrushSettings(prev => ({ ...prev, isEraser: true }));
+                      }}
+                      className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all ${activeTool === 'eraser' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-[#323238] text-slate-400 hover:text-slate-200 border border-[#3d3d45]'}`}
+                    >
+                      <Eraser className="w-3.5 h-3.5" /> 擦除
+                    </button>
+                    <button 
+                      onClick={() => setActiveTool('magic_wand')}
+                      className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all ${activeTool === 'magic_wand' ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-[#323238] text-slate-400 hover:text-slate-200 border border-[#3d3d45]'}`}
+                    >
+                      <Wand2 className="w-3.5 h-3.5" /> 选取
+                    </button>
+                  </div>
+
+                  {activeTool !== 'magic_wand' ? (
+                      <div className="space-y-4">
+                        <div className="space-y-3">
+                            <div className="flex justify-between items-center">
+                            <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">画笔大小</span>
+                            <span className="text-xs font-mono text-indigo-400">{brushSettings.size.toFixed(0)}px</span>
+                            </div>
+                            <input 
+                            type="range" min="1" max="200"
+                            value={brushSettings.size}
+                            onChange={(e) => setBrushSettings(prev => ({ ...prev, size: Number(e.target.value) }))}
+                            className="w-full h-1.5 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                            />
+                        </div>
+
+                        <div className="space-y-3">
+                            <div className="flex justify-between items-center">
+                            <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">流动强度</span>
+                            <span className="text-xs font-mono text-indigo-400">{(brushSettings.strength * 100).toFixed(0)}%</span>
+                            </div>
+                            <input 
+                            type="range" min="0" max="1" step="0.01"
+                            value={brushSettings.strength}
+                            onChange={(e) => setBrushSettings(prev => ({ ...prev, strength: Number(e.target.value) }))}
+                            className="w-full h-1.5 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                            />
+                        </div>
+                      </div>
+                  ) : (
+                      <div className="space-y-4">
+                        <div className="space-y-3">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">选取阈值</span>
+                            <span className="text-xs font-mono text-indigo-400">{magicWandThreshold}</span>
+                          </div>
+                          <input 
+                            type="range" min="1" max="100"
+                            value={magicWandThreshold}
+                            onChange={(e) => setMagicWandThreshold(Number(e.target.value))}
+                            className="w-full h-1.5 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between bg-[#2d2d33]/30 p-2.5 rounded-lg border border-[#323238]">
+                          <span className="text-xs font-medium text-slate-300">显示遮罩预览</span>
+                          <Switch 
+                            checked={showMaskOverlay}
+                            onChange={setShowMaskOverlay}
+                            color="bg-rose-500"
+                          />
+                        </div>
+                      </div>
+                  )}
+             </div>
           </section>
         </aside>
 
@@ -691,15 +795,12 @@ const App: React.FC = () => {
               onTextureUpdate={handleTextureUpdate}
               windDirection={windDirection}
               windTrigger={windTrigger}
-              clearBrushTrigger={clearBrushTrigger}
-              clearGlobalTrigger={clearGlobalTrigger}
-              clearObstacleTrigger={clearObstacleTrigger}
-              globalBlur={globalBlur}
-              obstacleBlur={obstacleBlur}
-              brushBlur={brushBlur}
+              resetTrigger={resetTrigger}
+              
+              layers={layers}
+              activeLayerId={activeLayerId}
               globalLayerVisible={globalLayerVisible}
-              obstacleLayerVisible={obstacleLayerVisible}
-              brushLayerVisible={brushLayerVisible}
+
               magicWandThreshold={magicWandThreshold}
               showMaskOverlay={showMaskOverlay}
               onPaintingComplete={handlePaintingComplete}
@@ -719,18 +820,18 @@ const App: React.FC = () => {
             {/* 3D Toolbar Overlay */}
             <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-10 flex flex-row items-center gap-3">
                {/* Buttons */}
-               <div className="flex bg-slate-900/60 backdrop-blur-md p-2 rounded-xl border border-white/10 shadow-xl h-12 items-center">
+               <div className="flex bg-[#18181b]/80 backdrop-blur-md p-2 rounded-xl border border-[#2d2d33] shadow-xl h-12 items-center">
                 <button 
                     onClick={() => setShowArrows(!showArrows)}
-                    className={`p-2 rounded-lg transition-colors ${showArrows ? 'bg-indigo-500/80 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
+                    className={`p-2 rounded-lg transition-colors ${showArrows ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-[#252529]'}`}
                     title={showArrows ? '隐藏箭头' : '显示箭头'}
                 >
                   <ArrowRightLeft className="w-4 h-4" />
                 </button>
-                <div className="w-px h-6 bg-white/10 mx-2"></div>
+                <div className="w-px h-6 bg-[#2d2d33] mx-2"></div>
                 <button 
                     onClick={() => setShowFlowMap(!showFlowMap)}
-                    className={`p-2 rounded-lg transition-colors ${showFlowMap ? 'bg-indigo-500/80 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-300 hover:text-white hover:bg-white/10'}`}
+                    className={`p-2 rounded-lg transition-colors ${showFlowMap ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'text-slate-400 hover:text-white hover:bg-[#252529]'}`}
                     title={showFlowMap ? '隐藏流动贴图' : '显示流动贴图'}
                 >
                   <Layers className="w-4 h-4" />
@@ -738,69 +839,69 @@ const App: React.FC = () => {
                </div>
 
                {/* Preview Settings Sliders */}
-               <div className="flex flex-row items-center bg-slate-900/60 backdrop-blur-md p-2 rounded-xl border border-white/10 shadow-2xl transition-all duration-300 h-12">
+               <div className="flex flex-row items-center bg-[#18181b]/80 backdrop-blur-md p-2 rounded-xl border border-[#2d2d33] shadow-2xl transition-all duration-300 h-12">
                   <div className="flex items-center gap-4">
                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">动画速度</span>
+                        <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">动画速度</span>
                         <input 
                         type="range" min="0" max="2" step="0.05"
                         value={previewSpeed}
                         onChange={(e) => setPreviewSpeed(Number(e.target.value))}
-                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        className="w-24 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
                         />
-                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{previewSpeed.toFixed(2)}</span>
+                        <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{previewSpeed.toFixed(2)}</span>
                     </div>
                     
-                    <div className="w-px h-4 bg-white/10"></div>
+                    <div className="w-px h-4 bg-[#2d2d33]"></div>
                     
                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">扭曲程度</span>
+                        <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">扭曲程度</span>
                         <input 
                         type="range" min="0" max="0.5" step="0.01"
                         value={previewDistortion}
                         onChange={(e) => setPreviewDistortion(Number(e.target.value))}
-                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        className="w-24 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
                         />
-                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{previewDistortion.toFixed(2)}</span>
+                        <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{previewDistortion.toFixed(2)}</span>
                     </div>
 
-                    <div className="w-px h-4 bg-white/10"></div>
+                    <div className="w-px h-4 bg-[#2d2d33]"></div>
 
                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-slate-300 font-medium uppercase tracking-wider whitespace-nowrap">箭头密度</span>
+                        <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">箭头密度</span>
                         <input 
                         type="range" min="16" max="128" step="4"
                         value={arrowDensity}
                         onChange={(e) => setArrowDensity(Number(e.target.value))}
-                        className="w-24 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer accent-indigo-400 hover:accent-indigo-300 transition-colors"
+                        className="w-24 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
                         />
-                        <span className="text-[10px] text-indigo-300 font-mono min-w-[3ch] text-right">{arrowDensity}</span>
+                        <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{arrowDensity}</span>
                     </div>
                   </div>
                </div>
             </div>
 
             {/* Controls Help Overlay */}
-            <div className="absolute top-4 left-4 z-10 bg-slate-800/60 backdrop-blur-sm p-3 rounded-lg border border-slate-700/50 shadow-xl text-xs text-slate-300 pointer-events-none select-none">
-              <div className="space-y-3">
+            <div className="absolute top-4 left-4 z-10 bg-[#18181b]/80 backdrop-blur-sm p-4 rounded-xl border border-[#2d2d33] shadow-xl text-xs text-slate-300 pointer-events-none select-none">
+              <div className="space-y-4">
                 <div>
-                  <strong className="text-slate-400 block mb-1">快捷键</strong>
-                  <ul className="space-y-1 text-slate-400">
-                    <li className="flex items-center justify-between gap-4"><span>画笔模式</span> <span className="text-sky-400 font-bold bg-slate-700/50 px-1.5 rounded">B</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>橡皮擦</span> <span className="text-rose-400 font-bold bg-slate-700/50 px-1.5 rounded">E</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>显示箭头</span> <span className="text-indigo-400 font-bold bg-slate-700/50 px-1.5 rounded">V</span></li>
-                    <li className="flex items-center justify-between gap-4 pt-1 border-t border-slate-700/30 mt-1"><span>2D视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">1</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>分屏视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">2</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>3D视图</span> <span className="text-slate-200 font-bold bg-slate-700/50 px-1.5 rounded">3</span></li>
+                  <strong className="text-slate-400 block mb-2 uppercase tracking-wider text-[10px] font-bold">快捷键</strong>
+                  <ul className="space-y-1.5 text-slate-400">
+                    <li className="flex items-center justify-between gap-6"><span>画笔模式</span> <span className="text-indigo-400 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">B</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>橡皮擦</span> <span className="text-rose-400 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">E</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>显示箭头</span> <span className="text-indigo-400 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">V</span></li>
+                    <li className="flex items-center justify-between gap-6 pt-1.5 border-t border-[#2d2d33] mt-1.5"><span>2D视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">1</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>分屏视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">2</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>3D视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1.5 py-0.5 rounded text-[10px]">3</span></li>
                   </ul>
                 </div>
-                <div className="h-px bg-slate-700/50"></div>
+                <div className="h-px bg-[#2d2d33]"></div>
                 <div>
-                  <strong className="text-slate-400 block mb-1">鼠标操作</strong>
-                  <ul className="space-y-1 text-slate-400">
-                    <li className="flex items-center justify-between gap-4"><span>绘制</span> <span className="text-slate-200">左键拖拽</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>旋转视图</span> <span className="text-slate-200">中键拖拽</span></li>
-                    <li className="flex items-center justify-between gap-4"><span>缩放</span> <span className="text-slate-200">滚轮</span></li>
+                  <strong className="text-slate-400 block mb-2 uppercase tracking-wider text-[10px] font-bold">鼠标操作</strong>
+                  <ul className="space-y-1.5 text-slate-400">
+                    <li className="flex items-center justify-between gap-6"><span>绘制</span> <span className="text-slate-300">左键拖拽</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>旋转视图</span> <span className="text-slate-300">中键拖拽</span></li>
+                    <li className="flex items-center justify-between gap-6"><span>缩放</span> <span className="text-slate-300">滚轮</span></li>
                   </ul>
                 </div>
               </div>

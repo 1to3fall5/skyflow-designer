@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
-import { BrushSettings, ActiveTool, FlowPainterHandle, ProjectionType, LayerSettings } from '../types';
+import { BrushSettings, ActiveTool, FlowPainterHandle, ProjectionType, Layer } from '../types';
 
 interface FlowPainterProps {
   brushSettings: BrushSettings;
@@ -9,18 +9,11 @@ interface FlowPainterProps {
   windDirection?: number;
   windTrigger?: number;
   resetTrigger?: number;
-  clearBrushTrigger?: number;
-  clearGlobalTrigger?: number;
-  clearObstacleTrigger?: number;
   
-  // Layer Settings
-  globalBlur: number;
-  obstacleBlur: number;
-  brushBlur: number;
-  
-  globalLayerVisible?: boolean;
-  obstacleLayerVisible?: boolean;
-  brushLayerVisible?: boolean;
+  // Layer System
+  layers: Layer[];
+  activeLayerId: string;
+  globalLayerVisible?: boolean; // Controls visibility of the generated wind base
   
   // Magic Wand
   magicWandThreshold?: number;
@@ -42,15 +35,9 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   windDirection = 0,
   windTrigger = 0,
   resetTrigger = 0,
-  clearBrushTrigger = 0,
-  clearGlobalTrigger = 0,
-  clearObstacleTrigger = 0,
-  globalBlur = 0,
-  obstacleBlur = 0,
-  brushBlur = 0,
+  layers,
+  activeLayerId,
   globalLayerVisible = true,
-  obstacleLayerVisible = true,
-  brushLayerVisible = true,
   magicWandThreshold = 20,
   showMaskOverlay = false,
   showReference = false,
@@ -62,25 +49,23 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // Three Layers
+  // Layers
   const layerGlobalRef = useRef<HTMLCanvasElement | null>(null);
-  const layerObstacleRef = useRef<HTMLCanvasElement | null>(null);
-  const layerBrushRef = useRef<HTMLCanvasElement | null>(null);
+  const layerCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  
   const cursorPreviewRef = useRef<HTMLDivElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
   const seamlessHelperRef = useRef<HTMLCanvasElement | null>(null);
-  const tempBrushRef = useRef<HTMLCanvasElement | null>(null);
-  const tempObstRef = useRef<HTMLCanvasElement | null>(null);
   const redOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const flowMapRef = useRef<HTMLCanvasElement | null>(null);
   const brushTipCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const renderPendingRef = useRef(false);
-  const lastRenderTimeRef = useRef(0);
 
   // History Management
-  const historyRef = useRef<{ brush: ImageData; obstacle: ImageData }[]>([]);
+  // Store a Map of layerID -> ImageData
+  const historyRef = useRef<Map<string, ImageData>[]>([]);
   const historyIndexRef = useRef<number>(-1);
 
   // Helper to init canvas
@@ -170,12 +155,23 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const mainCanvas = canvasRef.current;
     if (!mainCanvas) return;
     
-    // Ensure layers exist
-    if (!layerGlobalRef.current) layerGlobalRef.current = initCanvas(1024, 1024); 
-    if (!layerObstacleRef.current) layerObstacleRef.current = initCanvas(1024, 1024, 'rgba(0,0,0,0)'); 
-    if (!layerBrushRef.current) layerBrushRef.current = initCanvas(1024, 1024, 'rgba(128,128,0,0)'); 
+    // Ensure Global Layer
+    if (!layerGlobalRef.current) {
+        // Initialize with default global wind if not exists
+        layerGlobalRef.current = initCanvas(1024, 1024);
+        
+        // Trigger a generation if it's empty (though initCanvas clears it)
+        // Actually, we should probably force a wind gen if it's the very first render
+        // But the useEffect for windTrigger should handle it.
+        // Let's just make sure we fill it with neutral first.
+        const gCtx = layerGlobalRef.current.getContext('2d');
+        if (gCtx) {
+            gCtx.fillStyle = 'rgb(128, 128, 0)';
+            gCtx.fillRect(0, 0, 1024, 1024);
+        }
+    }
 
-    const ctx = mainCanvas.getContext('2d', { alpha: false }); // Disable alpha for main display canvas if possible
+    const ctx = mainCanvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
     // Prepare Flow Map Canvas (Data Only)
@@ -187,66 +183,96 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const flowCtx = flowMapRef.current.getContext('2d', { alpha: false });
     if (!flowCtx) return;
 
-    // 1. Draw Global Layer to Flow Map
-    // We can skip fillRect(128,128,0) if we draw global layer directly
+    // 1. Draw Global Layer to Flow Map (Base)
     if (layerGlobalRef.current && globalLayerVisible) {
-        drawBlurred(flowCtx, layerGlobalRef.current, globalBlur);
+        // No blur for global layer as requested
+        flowCtx.drawImage(layerGlobalRef.current, 0, 0);
     } else {
         flowCtx.fillStyle = 'rgb(128, 128, 0)';
         flowCtx.fillRect(0, 0, 1024, 1024);
     }
 
-    // 2. Draw Brush Layer to Flow Map
-    if (layerBrushRef.current && brushLayerVisible) {
-        if (brushBlur > 0) {
-            if (!tempBrushRef.current) {
-                tempBrushRef.current = document.createElement('canvas');
-                tempBrushRef.current.width = 1024;
-                tempBrushRef.current.height = 1024;
-            }
-            const tempBrush = tempBrushRef.current;
-            const tbCtx = tempBrush.getContext('2d');
-            if (tbCtx) {
-                 tbCtx.clearRect(0, 0, 1024, 1024);
-                 drawBlurred(tbCtx, layerBrushRef.current, brushBlur);
-                 flowCtx.drawImage(tempBrush, 0, 0);
-            }
-        } else {
-            flowCtx.drawImage(layerBrushRef.current, 0, 0);
+    // 2. Iterate and Draw Layers
+    const layersMap = layerCanvasesRef.current;
+    
+    // We'll use a temp canvas to handle obstacle compositing (source-in) if needed
+    // DO NOT use seamlessHelperRef here, as drawBlurred uses it internally.
+    // Create a fresh dedicated canvas for Obstacle masking.
+    let obstacleHelper = document.createElement('canvas');
+    obstacleHelper.width = 1024;
+    obstacleHelper.height = 1024;
+    const obsHelperCtx = obstacleHelper.getContext('2d');
+
+    // We need to collect effective obstacle canvas for the mask overlay
+    // If multiple layers are obstacles, we might need to composite them for the red overlay
+    // For simplicity, we'll create a temp canvas for the combined obstacle mask if needed
+    let combinedObstacle: HTMLCanvasElement | null = null;
+    let combinedObstacleCtx: CanvasRenderingContext2D | null = null;
+
+    if (showMaskOverlay) {
+        if (!combinedObstacle) {
+            combinedObstacle = document.createElement('canvas');
+            combinedObstacle.width = 1024;
+            combinedObstacle.height = 1024;
+            combinedObstacleCtx = combinedObstacle.getContext('2d');
         }
     }
 
-    // 3. Prepare and Apply Obstacle Data
-    let effectiveObstacle: HTMLCanvasElement | null = null;
-    if (layerObstacleRef.current && obstacleLayerVisible) {
-        if (obstacleBlur > 0) {
-             if (!tempObstRef.current) {
-                 tempObstRef.current = document.createElement('canvas');
-                 tempObstRef.current.width = 1024;
-                 tempObstRef.current.height = 1024;
-             }
-             effectiveObstacle = tempObstRef.current;
-             const toCtx = effectiveObstacle.getContext('2d');
-             if (toCtx) {
-                 toCtx.clearRect(0, 0, 1024, 1024);
-                 drawBlurred(toCtx, layerObstacleRef.current, obstacleBlur);
-                 flowCtx.drawImage(effectiveObstacle, 0, 0);
-             }
+    layers.forEach(layer => {
+        if (!layer.visible) return;
+        const layerCanvas = layersMap.get(layer.id);
+        if (!layerCanvas) return;
+
+        if (layer.isObstacle && obsHelperCtx) {
+            // -- Obstacle Rendering Logic --
+            // We want to draw the layer's shape, but force the color to Neutral (128, 128, 0).
+            // This ensures that even if the user painted with "Flow" colors, toggling "Obstacle" makes it act like one.
+            
+            // 1. Clear Helper
+            obsHelperCtx.clearRect(0, 0, 1024, 1024);
+            
+            // 2. Draw the Layer Content (Shape)
+            if (layer.blur > 0) {
+                // Here drawBlurred uses seamlessHelperRef.current
+                // We are drawing INTO obsHelperCtx (obstacleHelper)
+                // This is safe because obstacleHelper != seamlessHelperRef.current
+                drawBlurred(obsHelperCtx, layerCanvas, layer.blur);
+            } else {
+                obsHelperCtx.drawImage(layerCanvas, 0, 0);
+            }
+            
+            // 3. Composite "Source-In" with Obstacle Color
+            obsHelperCtx.globalCompositeOperation = 'source-in';
+            obsHelperCtx.fillStyle = 'rgb(128, 128, 0)';
+            obsHelperCtx.fillRect(0, 0, 1024, 1024);
+            obsHelperCtx.globalCompositeOperation = 'source-over'; // Reset
+
+            // 4. Draw result to Flow Map
+            flowCtx.drawImage(obstacleHelper, 0, 0);
+
+            // 5. Add to Combined Obstacle Mask (for Red Overlay)
+            if (combinedObstacleCtx) {
+                 combinedObstacleCtx.drawImage(obstacleHelper, 0, 0);
+            }
+
         } else {
-            effectiveObstacle = layerObstacleRef.current;
-            flowCtx.drawImage(effectiveObstacle, 0, 0);
+            // -- Normal Flow Rendering Logic --
+            if (layer.blur > 0) {
+                drawBlurred(flowCtx, layerCanvas, layer.blur);
+            } else {
+                flowCtx.drawImage(layerCanvas, 0, 0);
+            }
         }
-    }
+    });
 
     // Update the 3D Texture
     onTextureUpdate(flowMapRef.current);
 
-    // Now render to the Display Canvas
-    // We don't need clearRect if we draw the full flowMap
+    // Render to Display Canvas
     ctx.drawImage(flowMapRef.current, 0, 0);
 
-    // 5. Draw Red Mask Overlay
-    if (effectiveObstacle && showMaskOverlay) {
+    // 3. Draw Red Mask Overlay
+    if (showMaskOverlay && combinedObstacle) {
         if (!redOverlayRef.current) {
             redOverlayRef.current = document.createElement('canvas');
             redOverlayRef.current.width = 1024;
@@ -258,7 +284,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         if (rCtx) {
             rCtx.clearRect(0, 0, 1024, 1024);
             rCtx.globalCompositeOperation = 'source-over';
-            rCtx.drawImage(effectiveObstacle, 0, 0);
+            rCtx.drawImage(combinedObstacle, 0, 0);
             rCtx.globalCompositeOperation = 'source-in';
             rCtx.fillStyle = 'rgba(255, 0, 0, 0.6)';
             rCtx.fillRect(0, 0, 1024, 1024);
@@ -268,7 +294,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     }
     
     renderPendingRef.current = false;
-  }, [onTextureUpdate, globalBlur, obstacleBlur, brushBlur, drawBlurred, globalLayerVisible, obstacleLayerVisible, brushLayerVisible, showMaskOverlay]);
+  }, [onTextureUpdate, globalLayerVisible, showMaskOverlay, layers, drawBlurred]);
 
   const renderComposite = useCallback(() => {
     if (renderPendingRef.current) return;
@@ -276,32 +302,42 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     requestAnimationFrame(renderCompositeInternal);
   }, [renderCompositeInternal]);
 
-  const saveHistory = useCallback(() => {
-    const brushCanvas = layerBrushRef.current;
-    const obstacleCanvas = layerObstacleRef.current;
-    if (!brushCanvas || !obstacleCanvas) return;
+  // Sync Layers Ref
+  useEffect(() => {
+      const map = layerCanvasesRef.current;
+      // Add missing
+      layers.forEach(layer => {
+          if (!map.has(layer.id)) {
+              map.set(layer.id, initCanvas(1024, 1024, 'rgba(0,0,0,0)'));
+          }
+      });
+      // Remove deleted
+      const activeIds = new Set(layers.map(l => l.id));
+      for (const id of map.keys()) {
+          if (!activeIds.has(id)) {
+              map.delete(id);
+          }
+      }
+      renderComposite();
+  }, [layers, renderComposite]);
 
+  const saveHistory = useCallback(() => {
     console.log('[FlowPainter] Saving history. Current Index:', historyIndexRef.current, 'Total:', historyRef.current.length);
 
-    const bCtx = brushCanvas.getContext('2d', { willReadFrequently: true });
-    const oCtx = obstacleCanvas.getContext('2d', { willReadFrequently: true });
-    if (!bCtx || !oCtx) return;
-
-    const w = 1024, h = 1024;
-    const brushData = bCtx.getImageData(0, 0, w, h);
-    const obstacleData = oCtx.getImageData(0, 0, w, h);
-
-    const newState = {
-        brush: brushData,
-        obstacle: obstacleData
-    };
+    const snapshot = new Map<string, ImageData>();
+    layerCanvasesRef.current.forEach((canvas, id) => {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx) {
+            snapshot.set(id, ctx.getImageData(0, 0, 1024, 1024));
+        }
+    });
 
     // If we are not at the end, truncate
     if (historyIndexRef.current < historyRef.current.length - 1) {
         historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
     }
 
-    historyRef.current.push(newState);
+    historyRef.current.push(snapshot);
     historyIndexRef.current++;
 
     // Limit size (20 steps)
@@ -315,40 +351,50 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const state = historyRef.current[index];
     if (!state) return;
 
-    const brushCanvas = layerBrushRef.current;
-    const obstacleCanvas = layerObstacleRef.current;
-    if (!brushCanvas || !obstacleCanvas) return;
-
-    const bCtx = brushCanvas.getContext('2d');
-    const oCtx = obstacleCanvas.getContext('2d');
-    if (!bCtx || !oCtx) return;
-
-    bCtx.putImageData(state.brush, 0, 0);
-    oCtx.putImageData(state.obstacle, 0, 0);
+    // Clear all current canvases first? Or assume state covers all?
+    // State might contain IDs that are no longer in `layers` prop if we undid a "Add Layer" action?
+    // Actually, `layers` prop is controlled by App. `undo` here only restores CONTENT.
+    // If we undid a "Layer Deletion", we rely on App to restore the layer object, 
+    // but FlowPainter doesn't know about App's state.
+    // LIMITATION: This local history only restores CANVAS CONTENT. It assumes the Layer IDs still exist.
+    // For a robust system, App should handle history including Layer structure.
+    // For now, we just restore content to matching IDs.
+    
+    state.forEach((data, id) => {
+        const canvas = layerCanvasesRef.current.get(id);
+        if (canvas) {
+            canvas.getContext('2d')?.putImageData(data, 0, 0);
+        }
+    });
     
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
   }, [renderComposite, onPaintingComplete]);
 
   const undo = useCallback(() => {
-    console.log('[FlowPainter] Undo called. Index:', historyIndexRef.current);
     if (historyIndexRef.current > 0) {
         historyIndexRef.current--;
         loadHistory(historyIndexRef.current);
-    } else {
-        console.log('[FlowPainter] Undo ignored: Already at start');
     }
   }, [loadHistory]);
 
   const redo = useCallback(() => {
-    console.log('[FlowPainter] Redo called. Index:', historyIndexRef.current, 'Total:', historyRef.current.length);
     if (historyIndexRef.current < historyRef.current.length - 1) {
         historyIndexRef.current++;
         loadHistory(historyIndexRef.current);
-    } else {
-        console.log('[FlowPainter] Redo ignored: Already at end');
     }
   }, [loadHistory]);
+
+  const clearLayer = useCallback((id: string) => {
+      const canvas = layerCanvasesRef.current.get(id);
+      if (canvas) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) ctx.clearRect(0, 0, 1024, 1024);
+          renderComposite();
+          saveHistory();
+          if (onPaintingComplete) onPaintingComplete();
+      }
+  }, [renderComposite, saveHistory, onPaintingComplete]);
 
   const [isDrawing, setIsDrawing] = useState(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
@@ -356,22 +402,20 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   // Zoom and Pan State
   const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [isPanning, setIsPanning] = useState(false);
-  const [isZooming, setIsZooming] = useState(false); // New state for drag zoom
+  const [isZooming, setIsZooming] = useState(false);
   const panStart = useRef<{ x: number; y: number } | null>(null);
-  const zoomStart = useRef<{ y: number; startScale: number } | null>(null); // Track zoom drag start
+  const zoomStart = useRef<{ y: number; startScale: number } | null>(null);
 
-  // Brush Resize State (Mirroring UEControls logic)
+  // Brush Resize State
   const isFKeyPressed = useRef(false);
   const hasResizedBrush = useRef(false);
   const fKeyAccumulatedMovement = useRef(0);
   const currentBrushSizeRef = useRef(brushSettings.size);
 
-  // Keep ref in sync
   useEffect(() => {
     currentBrushSizeRef.current = brushSettings.size;
   }, [brushSettings.size]);
 
-  // Reset View
   const resetView = useCallback(() => {
       setTransform({ x: 0, y: 0, scale: 1 });
   }, []);
@@ -379,16 +423,13 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   // Keyboard Shortcuts
   useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
-          // Check if target is input or textarea
           if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-          
           const key = e.key.toLowerCase();
           if (key === 'f') {
               if (!isFKeyPressed.current) {
                   isFKeyPressed.current = true;
                   hasResizedBrush.current = false;
                   fKeyAccumulatedMovement.current = 0;
-                  // Use pointer lock if supported
                   canvasRef.current?.requestPointerLock();
               }
               return;
@@ -402,8 +443,6 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
               if (document.pointerLockElement === canvasRef.current) {
                   document.exitPointerLock();
               }
-              
-              // Only trigger reset if we didn't resize the brush
               if (!hasResizedBrush.current) {
                   resetView();
               }
@@ -421,23 +460,18 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
       };
   }, [resetView]);
 
-  // Handle Global Mouse Move for Brush Resize (Pointer Lock)
-   useEffect(() => {
+  useEffect(() => {
      const handleGlobalMouseMove = (e: MouseEvent) => {
        if (isFKeyPressed.current && onSetBrushSize) {
          const dx = e.movementX;
          const dy = e.movementY;
          fKeyAccumulatedMovement.current += Math.abs(dx) + Math.abs(dy);
          
-         // Threshold to prevent accidental resize when just clicking F for reset
          if (fKeyAccumulatedMovement.current > 5 || hasResizedBrush.current) {
            hasResizedBrush.current = true;
-           const delta = dx;
-           // Adjust sensitivity and clamp (1 to 200)
-           const newSize = Math.max(1, Math.min(200, currentBrushSizeRef.current + delta * 0.5));
+           const newSize = Math.max(1, Math.min(200, currentBrushSizeRef.current + dx * 0.5));
            onSetBrushSize(newSize);
 
-           // Update preview size in real-time
            if (cursorPreviewRef.current) {
              const sizePercent = (newSize / 1024) * 100;
              cursorPreviewRef.current.style.width = `${sizePercent}%`;
@@ -451,24 +485,18 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
      return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
    }, [onSetBrushSize]);
 
-  // Mouse Wheel Zoom
   const handleWheel = useCallback((e: React.WheelEvent) => {
-      // Prevent default to stop page scroll if any
-      // e.preventDefault(); // React synthetic event can't always prevent default, but we'll try
-      
       const zoomSensitivity = 0.001;
       const newScale = Math.max(0.1, Math.min(10, transform.scale - e.deltaY * zoomSensitivity));
-      
-      setTransform(prev => ({
-          ...prev,
-          scale: newScale
-      }));
+      setTransform(prev => ({ ...prev, scale: newScale }));
   }, [transform.scale]);
 
   const floodFill = useCallback((u: number, v: number, threshold: number) => {
     const refCanvas = referenceCanvasRef.current;
-    const obsCanvas = layerObstacleRef.current;
-    if (!refCanvas || !obsCanvas) return;
+    // Target the active layer
+    const targetCanvas = layerCanvasesRef.current.get(activeLayerId);
+    
+    if (!refCanvas || !targetCanvas) return;
     
     const w = 1024;
     const h = 1024;
@@ -478,11 +506,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     if (startX < 0 || startX >= w || startY < 0 || startY >= h) return;
     
     const refCtx = refCanvas.getContext('2d', { willReadFrequently: true });
-    const obsCtx = obsCanvas.getContext('2d', { willReadFrequently: true });
-    if (!refCtx || !obsCtx) return;
+    const targetCtx = targetCanvas.getContext('2d', { willReadFrequently: true });
+    if (!refCtx || !targetCtx) return;
     
     const refData = refCtx.getImageData(0, 0, w, h);
-    const obsData = obsCtx.getImageData(0, 0, w, h);
+    const targetData = targetCtx.getImageData(0, 0, w, h);
     
     const targetIdx = (startY * w + startX) * 4;
     const targetColor = {
@@ -491,16 +519,31 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         b: refData.data[targetIdx + 2]
     };
     
-    // Stack for flood fill (store pixel index, not byte index, to save space/math?)
-    // Storing byte index is fine.
     const stack = [targetIdx];
-    const visited = new Uint8Array(w * h); // 0 = unvisited
+    const visited = new Uint8Array(w * h); 
     
-    // Threshold calculation
-    // Max distance in RGB space is sqrt(255^2 * 3) approx 441.
-    // Threshold 0-100.
     const maxDist = (threshold / 100) * 441; 
     const maxDistSq = maxDist * maxDist;
+
+    // Check if current layer is an Obstacle Layer
+    const activeLayer = layers.find(l => l.id === activeLayerId);
+    const isObstacle = activeLayer?.isObstacle;
+
+    // Fill Color
+    // If obstacle layer, fill with 128,128,0,255
+    // If normal layer, what to fill with? Magic wand usually selects area.
+    // User context: "Magic Wand" was used to select area and mark as obstacle.
+    // If we are on a Flow layer, maybe we just want to fill with current brush flow?
+    // But Flood Fill usually fills with a color.
+    // Given the context, Flood Fill is primarily for Obstacles.
+    // I'll assume it fills with Obstacle Color (Neutral) if on Obstacle Layer,
+    // Or maybe just Neutral Flow if on Flow Layer (which means "Erase Flow" effectively?).
+    // Let's stick to Neutral Flow (128, 128, 0, 255) for now as it's the safest default for "Filling".
+    
+    const fillR = 128;
+    const fillG = 128;
+    const fillB = 0;
+    const fillA = 255;
 
     while (stack.length > 0) {
         const idx = stack.pop()!;
@@ -516,31 +559,25 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         const distSq = (r - targetColor.r)**2 + (g - targetColor.g)**2 + (b - targetColor.b)**2;
         
         if (distSq <= maxDistSq) {
-            // Mark as obstacle (128, 128, 0, 255)
-            obsData.data[idx] = 128;
-            obsData.data[idx + 1] = 128;
-            obsData.data[idx + 2] = 0;
-            obsData.data[idx + 3] = 255;
+            targetData.data[idx] = fillR;
+            targetData.data[idx + 1] = fillG;
+            targetData.data[idx + 2] = fillB;
+            targetData.data[idx + 3] = fillA;
             
             const x = pixelIndex % w;
             const y = Math.floor(pixelIndex / w);
             
-            // Add neighbors with wrapping support
             const isWrappable = projectionType === 'equirectangular' || projectionType === 'polar';
             
             if (x > 0) {
                 stack.push((idx - 4));
             } else if (isWrappable) {
-                // Wrap Left -> Right (x=0 -> x=w-1)
-                // idx is at x=0. neighbor at x=w-1 is + (w-1)*4
                 stack.push(idx + (w - 1) * 4);
             }
 
             if (x < w - 1) {
                 stack.push((idx + 4));
             } else if (isWrappable) {
-                // Wrap Right -> Left (x=w-1 -> x=0)
-                // idx is at x=w-1. neighbor at x=0 is - (w-1)*4
                 stack.push(idx - (w - 1) * 4);
             }
             
@@ -549,31 +586,19 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         }
     }
     
-    obsCtx.putImageData(obsData, 0, 0);
+    targetCtx.putImageData(targetData, 0, 0);
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
-  }, [renderComposite, onPaintingComplete, saveHistory, projectionType]);
+  }, [renderComposite, onPaintingComplete, saveHistory, projectionType, activeLayerId, layers]);
 
-  // Initialize Layers
+  // Initialize Layers (Effect handled above)
+  
+  // Initial History Save
   useEffect(() => {
-    if (!layerGlobalRef.current) {
-        layerGlobalRef.current = initCanvas(1024, 1024, 'rgb(128, 128, 0)');
-    }
-    if (!layerBrushRef.current) {
-        layerBrushRef.current = initCanvas(1024, 1024, 'rgba(0,0,0,0)');
-    }
-    if (!layerObstacleRef.current) {
-        layerObstacleRef.current = initCanvas(1024, 1024, 'rgba(0,0,0,0)');
-    }
-    
-    // Save initial empty state
-    if (historyRef.current.length === 0) {
-        saveHistory();
-    }
-
-    // Initial Render
-    renderComposite();
-  }, [renderComposite, saveHistory]);
+      if (historyRef.current.length === 0 && layerCanvasesRef.current.size > 0) {
+          saveHistory();
+      }
+  }, [layers, saveHistory]);
 
   const drawStamp = useCallback((
     targetCanvas: HTMLCanvasElement,
@@ -582,22 +607,25 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     lx: number, 
     ly: number, 
     settings: BrushSettings,
-    tool: ActiveTool
+    tool: ActiveTool,
+    isObstacleLayer: boolean
   ) => {
     const ctx = targetCanvas.getContext('2d');
     if (!ctx) return;
 
     const dist = Math.hypot(x - lx, y - ly);
-    if (dist < 0.5) return; // Slightly lower threshold
+    if (dist < 0.5) return;
 
     let r = 128, g = 128, a = 1.0;
     let compositeOp: GlobalCompositeOperation = 'source-over';
 
-    if (tool === 'obstacle') {
-        r = 128; g = 128; a = 1.0; 
-    } else if (tool === 'obstacle_eraser' || tool === 'eraser') {
+    if (tool === 'eraser') {
         compositeOp = 'destination-out';
-    } else if (tool === 'brush') {
+    } else if (isObstacleLayer) {
+        // If painting on obstacle layer with brush, paint neutral (obstacle) color
+        r = 128; g = 128; a = 1.0; 
+    } else {
+        // Normal Flow Brush
         const vx = (x - lx) / dist;
         const vy = (y - ly) / dist;
         const range = 127 * settings.strength;
@@ -605,7 +633,6 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         g = Math.min(255, Math.max(0, Math.round(128 + vy * range)));
     }
 
-    // --- Pre-render Brush Tip ---
     const radius = settings.size / 2;
     const tipSize = Math.ceil(settings.size);
     if (!brushTipCanvasRef.current) {
@@ -635,9 +662,8 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         tCtx.fillRect(0, 0, tipSize, tipSize);
     }
 
-    // --- Stamp Loop ---
     ctx.globalCompositeOperation = compositeOp;
-    const step = Math.max(1, settings.size * 0.1); // Increased step to 10% of size for performance
+    const step = Math.max(1, settings.size * 0.1); 
     
     for (let i = 0; i <= dist; i += step) {
         const t = i / dist;
@@ -650,16 +676,12 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   }, []);
 
   const stroke = useCallback((u: number, v: number, lu: number, lv: number) => {
-    let targetCanvas: HTMLCanvasElement | null = null;
-    
-    if (activeTool === 'brush' || activeTool === 'eraser') {
-        targetCanvas = layerBrushRef.current;
-    } else if (activeTool === 'obstacle' || activeTool === 'obstacle_eraser') {
-        targetCanvas = layerObstacleRef.current;
-    }
-    
+    const targetCanvas = layerCanvasesRef.current.get(activeLayerId);
     if (!targetCanvas) return;
     
+    const activeLayer = layers.find(l => l.id === activeLayerId);
+    const isObstacleLayer = activeLayer?.isObstacle || false;
+
     const w = 1024;
     const h = 1024;
     
@@ -668,91 +690,73 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const lx = lu * w;
     const ly = lv * h;
 
-    // Check for wrapping (Equirectangular and Polar wrap on U axis)
     const isWrappable = projectionType === 'equirectangular' || projectionType === 'polar';
     const dx = x - lx;
     const wrapThreshold = w * 0.5;
 
     if (isWrappable && Math.abs(dx) > wrapThreshold) {
-        // Wrapped detected
         if (dx > 0) {
-            // Jumped "Left" (e.g. 0.1 -> 0.9, dx > 0.5)
-            // Effectively u moved to u - 1.0
-            drawStamp(targetCanvas, x - w, y, lx, ly, brushSettings, activeTool);
-            // And lu moved to lu + 1.0
-            drawStamp(targetCanvas, x, y, lx + w, ly, brushSettings, activeTool);
+            drawStamp(targetCanvas, x - w, y, lx, ly, brushSettings, activeTool, isObstacleLayer);
+            drawStamp(targetCanvas, x, y, lx + w, ly, brushSettings, activeTool, isObstacleLayer);
         } else {
-             // Jumped "Right" (e.g. 0.9 -> 0.1, dx < -0.5)
-             // Effectively u moved to u + 1.0
-             drawStamp(targetCanvas, x + w, y, lx, ly, brushSettings, activeTool);
-             // And lu moved to lu - 1.0
-             drawStamp(targetCanvas, x, y, lx - w, ly, brushSettings, activeTool);
+             drawStamp(targetCanvas, x + w, y, lx, ly, brushSettings, activeTool, isObstacleLayer);
+             drawStamp(targetCanvas, x, y, lx - w, ly, brushSettings, activeTool, isObstacleLayer);
         }
     } else {
-        // Normal Stroke
-        drawStamp(targetCanvas, x, y, lx, ly, brushSettings, activeTool);
+        drawStamp(targetCanvas, x, y, lx, ly, brushSettings, activeTool, isObstacleLayer);
         
-        // Seamless Tiling (Draw ghost if near edge)
         if (isWrappable) {
              const radius = brushSettings.size / 2;
-             
-             // If painting near Left Edge, draw ghost on Right
              if (x < radius || lx < radius) {
-                 drawStamp(targetCanvas, x + w, y, lx + w, ly, brushSettings, activeTool);
+                 drawStamp(targetCanvas, x + w, y, lx + w, ly, brushSettings, activeTool, isObstacleLayer);
              }
-             
-             // If painting near Right Edge, draw ghost on Left
              if (x > w - radius || lx > w - radius) {
-                 drawStamp(targetCanvas, x - w, y, lx - w, ly, brushSettings, activeTool);
+                 drawStamp(targetCanvas, x - w, y, lx - w, ly, brushSettings, activeTool, isObstacleLayer);
              }
         }
     }
     
     renderComposite();
-  }, [activeTool, brushSettings, drawStamp, renderComposite, projectionType]);
+  }, [activeTool, brushSettings, drawStamp, renderComposite, projectionType, activeLayerId, layers]);
 
   useImperativeHandle(ref, () => ({
     stroke,
     floodFill,
     undo,
     redo,
-    saveHistory
+    saveHistory,
+    clearLayer
   }));
 
-  // Track previous triggers to avoid re-running effects on unrelated renders
+  // Track previous triggers
   const lastWindTrigger = useRef<number | null>(null);
   const lastWindDirection = useRef<number | null>(null);
   const lastProjectionType = useRef<ProjectionType | null>(null);
   const lastPolarAngle = useRef<number | null>(null);
-
-  const lastClearBrushTrigger = useRef(clearBrushTrigger);
-  const lastClearGlobalTrigger = useRef(clearGlobalTrigger);
-  const lastClearObstacleTrigger = useRef(clearObstacleTrigger);
   const lastResetTrigger = useRef(resetTrigger);
 
   // Generate Wind Effect (Global Layer)
   useEffect(() => {
-    // Check if relevant props actually changed
     const windChanged = 
         windTrigger !== lastWindTrigger.current ||
         windDirection !== lastWindDirection.current ||
         projectionType !== lastProjectionType.current ||
         polarAngle !== lastPolarAngle.current;
     
-    // Update refs
+    // Force initial generation if global layer is missing content
+    const isFirstRun = lastWindTrigger.current === null;
+
     lastWindTrigger.current = windTrigger;
     lastWindDirection.current = windDirection;
     lastProjectionType.current = projectionType;
     lastPolarAngle.current = polarAngle;
 
-    if (!windChanged) return;
-
-    // Generate wind if trigger fires OR wind parameters change
-    // But we only need to generate if we have a context
-    if (!layerGlobalRef.current) return;
+    if (!windChanged && !isFirstRun) return;
     
-    // We only update if it's visible, OR if we just want to keep the layer ready?
-    // Better to keep it updated even if hidden, so when toggled on it's correct.
+    // Ensure layer exists
+    if (!layerGlobalRef.current) {
+        layerGlobalRef.current = initCanvas(1024, 1024);
+    }
     
     const ctx = layerGlobalRef.current.getContext('2d');
     if (!ctx) return;
@@ -820,7 +824,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                     data[index] = 128;
                     data[index + 1] = 128;
                     data[index + 2] = 0;
-                    data[index + 3] = 255; // Full opacity for base
+                    data[index + 3] = 255; 
                     continue;
                 }
     
@@ -869,63 +873,10 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
     ctx.putImageData(imageData, 0, 0);
     renderComposite();
-    // Only call onPaintingComplete if this was a manual trigger, 
-    // or maybe we don't need to call it for live updates to avoid spamming history/undo stacks if we had them.
-    // But here it just updates version.
     if (onPaintingComplete) onPaintingComplete();
-    
   }, [windTrigger, windDirection, renderComposite, onPaintingComplete, projectionType, polarAngle]);
 
-  // Handle Clear Brush Layer
-  useEffect(() => {
-    if (clearBrushTrigger !== lastClearBrushTrigger.current) {
-        lastClearBrushTrigger.current = clearBrushTrigger;
-        if (clearBrushTrigger > 0) {
-            if (layerBrushRef.current) {
-                const ctx = layerBrushRef.current.getContext('2d');
-                if (ctx) ctx.clearRect(0,0,1024,1024);
-            }
-            renderComposite();
-            saveHistory();
-            if (onPaintingComplete) onPaintingComplete();
-        }
-    }
-  }, [clearBrushTrigger, renderComposite, onPaintingComplete, saveHistory]);
-
-  // Handle Clear Global Layer
-  useEffect(() => {
-    if (clearGlobalTrigger !== lastClearGlobalTrigger.current) {
-        lastClearGlobalTrigger.current = clearGlobalTrigger;
-        if (clearGlobalTrigger > 0) {
-            if (layerGlobalRef.current) {
-                const ctx = layerGlobalRef.current.getContext('2d');
-                // Reset to neutral flow (no movement)
-                if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
-            }
-            renderComposite();
-            saveHistory();
-            if (onPaintingComplete) onPaintingComplete();
-        }
-    }
-  }, [clearGlobalTrigger, renderComposite, onPaintingComplete, saveHistory]);
-
-  // Handle Clear Obstacle Layer
-  useEffect(() => {
-    if (clearObstacleTrigger !== lastClearObstacleTrigger.current) {
-        lastClearObstacleTrigger.current = clearObstacleTrigger;
-        if (clearObstacleTrigger > 0) {
-            if (layerObstacleRef.current) {
-                const ctx = layerObstacleRef.current.getContext('2d');
-                if (ctx) ctx.clearRect(0,0,1024,1024);
-            }
-            renderComposite();
-            saveHistory();
-            if (onPaintingComplete) onPaintingComplete();
-        }
-    }
-  }, [clearObstacleTrigger, renderComposite, onPaintingComplete, saveHistory]);
-
-  // Handle Reset (Clear Brush and Obstacle layers, Reset Global to neutral)
+  // Handle Reset
   useEffect(() => {
       if (resetTrigger !== lastResetTrigger.current) {
           lastResetTrigger.current = resetTrigger;
@@ -934,14 +885,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                   const ctx = layerGlobalRef.current.getContext('2d');
                   if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
               }
-              if (layerBrushRef.current) {
-                  const ctx = layerBrushRef.current.getContext('2d');
+              // Clear all layers
+              layerCanvasesRef.current.forEach(canvas => {
+                  const ctx = canvas.getContext('2d');
                   if (ctx) ctx.clearRect(0,0,1024,1024);
-              }
-              if (layerObstacleRef.current) {
-                  const ctx = layerObstacleRef.current.getContext('2d');
-                  if (ctx) ctx.clearRect(0,0,1024,1024);
-              }
+              });
               renderComposite();
               saveHistory();
               if (onPaintingComplete) onPaintingComplete();
@@ -949,69 +897,45 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
       }
   }, [resetTrigger, renderComposite, onPaintingComplete, saveHistory]);
 
-  // Handle Blur Amount Change - Re-render
-  useEffect(() => {
-      renderComposite();
-  }, [renderComposite]);
-
-  const getUV = (e: React.MouseEvent | React.TouchEvent) => {
+  const getUV = (e: React.PointerEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return { u: 0, v: 0 };
     const rect = canvas.getBoundingClientRect();
-    let clientX, clientY;
-    if ('touches' in e) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
-    } else {
-      clientX = (e as React.MouseEvent).clientX;
-      clientY = (e as React.MouseEvent).clientY;
-    }
-    const u = (clientX - rect.left) / rect.width;
-    const v = (clientY - rect.top) / rect.height;
+    const u = (e.clientX - rect.left) / rect.width;
+    const v = (e.clientY - rect.top) / rect.height;
     return { u, v };
   };
 
-  const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
-    if (isFKeyPressed.current) return; // Skip if resizing brush
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (isFKeyPressed.current) return;
     
-    // Panning Check (Middle Mouse or Alt+Left)
+    // Ensure we capture all pointer events (even outside canvas)
+    (e.target as Element).setPointerCapture(e.pointerId);
+
     let isPanAction = false;
     let isZoomAction = false;
-    let clientX, clientY;
     
-    if ('touches' in e) {
-        clientX = e.touches[0].clientX;
-        clientY = e.touches[0].clientY;
-    } else {
-        const me = e as React.MouseEvent;
-        clientX = me.clientX;
-        clientY = me.clientY;
-        
-        // Ctrl + Middle Click -> Zoom Drag
-        if (me.ctrlKey && me.button === 1) {
-            isZoomAction = true;
-        } 
-        // Middle Click OR Alt + Left Click -> Pan
-        else if (me.button === 1 || me.altKey) {
-            isPanAction = true;
-        }
+    if (e.ctrlKey && e.button === 1) {
+        isZoomAction = true;
+    } 
+    else if (e.button === 1 || e.altKey) {
+        isPanAction = true;
     }
 
     if (isZoomAction) {
         setIsZooming(true);
-        zoomStart.current = { y: clientY, startScale: transform.scale };
+        zoomStart.current = { y: e.clientY, startScale: transform.scale };
         return;
     }
 
     if (isPanAction) {
         setIsPanning(true);
-        panStart.current = { x: clientX - transform.x, y: clientY - transform.y };
+        panStart.current = { x: e.clientX - transform.x, y: e.clientY - transform.y };
         return;
     }
 
     const { u, v } = getUV(e);
     
-    // Update cursor position for preview via direct DOM
     if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
       cursorPreviewRef.current.style.display = 'block';
       cursorPreviewRef.current.style.left = `${u * 100}%`;
@@ -1028,23 +952,14 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     lastPos.current = { x: u, y: v };
   };
 
-  const handlePointerMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if (isFKeyPressed.current) return; // Skip if resizing brush
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (isFKeyPressed.current) return;
     
-    let clientX, clientY;
-    if ('touches' in e) {
-        clientX = e.touches[0].clientX;
-        clientY = e.touches[0].clientY;
-    } else {
-        clientX = (e as React.MouseEvent).clientX;
-        clientY = (e as React.MouseEvent).clientY;
-    }
-
     const { u, v } = getUV(e);
 
-    // Update cursor position for preview via direct DOM for performance
     if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
-      if (u < 0 || u > 1 || v < 0 || v > 1) {
+      // Check bounds slightly loosely or just allow it to follow
+      if (u < -0.1 || u > 1.1 || v < -0.1 || v > 1.1) {
         cursorPreviewRef.current.style.display = 'none';
       } else {
         cursorPreviewRef.current.style.display = 'block';
@@ -1056,16 +971,10 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     }
 
     if (isZooming && zoomStart.current) {
-        const deltaY = clientY - zoomStart.current.y;
-        // Drag Down -> Zoom Out, Drag Up -> Zoom In
-        // Sensitivity: 0.01 per pixel
+        const deltaY = e.clientY - zoomStart.current.y;
         const zoomSensitivity = 0.005;
         const newScale = Math.max(0.1, Math.min(10, zoomStart.current.startScale * (1 - deltaY * zoomSensitivity)));
-        
-        setTransform(prev => ({
-            ...prev,
-            scale: newScale
-        }));
+        setTransform(prev => ({ ...prev, scale: newScale }));
         return;
     }
 
@@ -1074,8 +983,8 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
          const startY = panStart.current.y;
          setTransform(prev => ({
              ...prev,
-             x: clientX - startX,
-             y: clientY - startY
+             x: e.clientX - startX,
+             y: e.clientY - startY
          }));
          return;
     }
@@ -1085,9 +994,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     lastPos.current = { x: u, y: v };
   };
 
-  const handlePointerUp = () => {
-    if (isFKeyPressed.current) return; // Skip if resizing brush
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (isFKeyPressed.current) return;
     
+    (e.target as Element).releasePointerCapture(e.pointerId);
+
     if (cursorPreviewRef.current) {
       cursorPreviewRef.current.style.display = 'none';
     }
@@ -1126,19 +1037,17 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
           height={1024}
           className={`block max-w-full max-h-full touch-none z-0 ${activeTool === 'magic_wand' ? 'cursor-default' : 'cursor-none'}`}
           style={{ width: 'auto', height: 'auto', imageRendering: 'pixelated' }}
-          onMouseDown={handlePointerDown}
-          onMouseMove={handlePointerMove}
-          onMouseUp={handlePointerUp}
-          onMouseLeave={() => {
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={() => {
             if (isFKeyPressed.current) return;
-            handlePointerUp();
-            if (cursorPreviewRef.current) cursorPreviewRef.current.style.display = 'none';
+            if (!isDrawing) {
+                // Only hide cursor if not drawing (if drawing, we captured pointer, so keep showing)
+                if (cursorPreviewRef.current) cursorPreviewRef.current.style.display = 'none';
+            }
           }}
-          onTouchStart={handlePointerDown}
-          onTouchMove={handlePointerMove}
-          onTouchEnd={handlePointerUp}
         />
-        {/* Brush Cursor Preview */}
         <div 
           ref={cursorPreviewRef}
           className="absolute pointer-events-none border border-white rounded-full bg-white/20 z-30 hidden"

@@ -7,7 +7,16 @@ export interface BrushSettings {
 
 export type ViewMode = 'split' | '2d' | '3d';
 
-export type ActiveTool = 'brush' | 'eraser' | 'obstacle' | 'obstacle_eraser' | 'magic_wand';
+export type ActiveTool = 'brush' | 'eraser' | 'magic_wand';
+
+export interface Layer {
+    id: string;
+    name: string;
+    visible: boolean;
+    isObstacle: boolean;
+    blur: number; // 0 to 32
+    opacity: number; // 0 to 1
+}
 
 export interface LayerSettings {
     blur: number; // 0 to 32
@@ -23,4 +32,5 @@ export interface FlowPainterHandle {
   undo: () => void;
   redo: () => void;
   saveHistory: () => void;
+  clearLayer: (id: string) => void;
 }
