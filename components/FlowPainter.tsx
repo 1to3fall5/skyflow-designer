@@ -29,6 +29,7 @@ interface FlowPainterProps {
 
   className?: string;
   onPaintingComplete?: () => void;
+  onSetBrushSize?: (size: number) => void;
   projectionType?: ProjectionType;
   polarAngle?: number;
 }
@@ -55,6 +56,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   showReference = false,
   className,
   onPaintingComplete,
+  onSetBrushSize,
   projectionType = 'equirectangular',
   polarAngle = 90
 }, ref) => {
@@ -64,6 +66,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   const layerGlobalRef = useRef<HTMLCanvasElement | null>(null);
   const layerObstacleRef = useRef<HTMLCanvasElement | null>(null);
   const layerBrushRef = useRef<HTMLCanvasElement | null>(null);
+  const cursorPreviewRef = useRef<HTMLDivElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
   const seamlessHelperRef = useRef<HTMLCanvasElement | null>(null);
@@ -342,6 +345,118 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
   const [isDrawing, setIsDrawing] = useState(false);
   const lastPos = useRef<{ x: number; y: number } | null>(null);
+
+  // Zoom and Pan State
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [isZooming, setIsZooming] = useState(false); // New state for drag zoom
+  const panStart = useRef<{ x: number; y: number } | null>(null);
+  const zoomStart = useRef<{ y: number; startScale: number } | null>(null); // Track zoom drag start
+
+  // Brush Resize State (Mirroring UEControls logic)
+  const isFKeyPressed = useRef(false);
+  const hasResizedBrush = useRef(false);
+  const fKeyAccumulatedMovement = useRef(0);
+  const currentBrushSizeRef = useRef(brushSettings.size);
+
+  // Keep ref in sync
+  useEffect(() => {
+    currentBrushSizeRef.current = brushSettings.size;
+  }, [brushSettings.size]);
+
+  // Reset View
+  const resetView = useCallback(() => {
+      setTransform({ x: 0, y: 0, scale: 1 });
+  }, []);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+          // Check if target is input or textarea
+          if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+          
+          const key = e.key.toLowerCase();
+          if (key === 'f') {
+              if (!isFKeyPressed.current) {
+                  isFKeyPressed.current = true;
+                  hasResizedBrush.current = false;
+                  fKeyAccumulatedMovement.current = 0;
+                  // Use pointer lock if supported
+                  canvasRef.current?.requestPointerLock();
+              }
+              return;
+          }
+      };
+
+      const handleKeyUp = (e: KeyboardEvent) => {
+          const key = e.key.toLowerCase();
+          if (key === 'f') {
+              isFKeyPressed.current = false;
+              if (document.pointerLockElement === canvasRef.current) {
+                  document.exitPointerLock();
+              }
+              
+              // Only trigger reset if we didn't resize the brush
+              if (!hasResizedBrush.current) {
+                  resetView();
+              }
+              hasResizedBrush.current = false;
+              fKeyAccumulatedMovement.current = 0;
+              return;
+          }
+      };
+
+      window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('keyup', handleKeyUp);
+      return () => {
+          window.removeEventListener('keydown', handleKeyDown);
+          window.removeEventListener('keyup', handleKeyUp);
+      };
+  }, [resetView]);
+
+  // Handle Global Mouse Move for Brush Resize (Pointer Lock)
+   useEffect(() => {
+     const handleGlobalMouseMove = (e: MouseEvent) => {
+       if (isFKeyPressed.current && onSetBrushSize) {
+         const dx = e.movementX;
+         const dy = e.movementY;
+         fKeyAccumulatedMovement.current += Math.abs(dx) + Math.abs(dy);
+         
+         // Threshold to prevent accidental resize when just clicking F for reset
+         if (fKeyAccumulatedMovement.current > 5 || hasResizedBrush.current) {
+           hasResizedBrush.current = true;
+           const delta = dx;
+           // Adjust sensitivity and clamp (1 to 200)
+           const newSize = Math.max(1, Math.min(200, currentBrushSizeRef.current + delta * 0.5));
+           onSetBrushSize(newSize);
+
+           // Update preview size in real-time
+           if (cursorPreviewRef.current) {
+             const sizePercent = (newSize / 1024) * 100;
+             cursorPreviewRef.current.style.width = `${sizePercent}%`;
+             cursorPreviewRef.current.style.height = `${sizePercent}%`;
+           }
+         }
+       }
+     };
+
+     window.addEventListener('mousemove', handleGlobalMouseMove);
+     return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
+   }, [onSetBrushSize]);
+
+  // Mouse Wheel Zoom
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+      // Prevent default to stop page scroll if any
+      // e.preventDefault(); // React synthetic event can't always prevent default, but we'll try
+      
+      const zoomSensitivity = 0.001;
+      const newScale = Math.max(0.1, Math.min(10, transform.scale - e.deltaY * zoomSensitivity));
+      
+      setTransform(prev => ({
+          ...prev,
+          scale: newScale
+      }));
+  }, [transform.scale]);
 
   const floodFill = useCallback((u: number, v: number, threshold: number) => {
     const refCanvas = referenceCanvasRef.current;
@@ -842,7 +957,52 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   };
 
   const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
+    if (isFKeyPressed.current) return; // Skip if resizing brush
+    
+    // Panning Check (Middle Mouse or Alt+Left)
+    let isPanAction = false;
+    let isZoomAction = false;
+    let clientX, clientY;
+    
+    if ('touches' in e) {
+        clientX = e.touches[0].clientX;
+        clientY = e.touches[0].clientY;
+    } else {
+        const me = e as React.MouseEvent;
+        clientX = me.clientX;
+        clientY = me.clientY;
+        
+        // Ctrl + Middle Click -> Zoom Drag
+        if (me.ctrlKey && me.button === 1) {
+            isZoomAction = true;
+        } 
+        // Middle Click OR Alt + Left Click -> Pan
+        else if (me.button === 1 || me.altKey) {
+            isPanAction = true;
+        }
+    }
+
+    if (isZoomAction) {
+        setIsZooming(true);
+        zoomStart.current = { y: clientY, startScale: transform.scale };
+        return;
+    }
+
+    if (isPanAction) {
+        setIsPanning(true);
+        panStart.current = { x: clientX - transform.x, y: clientY - transform.y };
+        return;
+    }
+
     const { u, v } = getUV(e);
+    
+    // Update cursor position for preview via direct DOM
+    if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
+      cursorPreviewRef.current.style.display = 'block';
+      cursorPreviewRef.current.style.left = `${u * 100}%`;
+      cursorPreviewRef.current.style.top = `${v * 100}%`;
+    }
+
     if (activeTool === 'magic_wand') {
         floodFill(u, v, magicWandThreshold);
         saveHistory();
@@ -854,13 +1014,80 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   };
 
   const handlePointerMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!isDrawing || !lastPos.current) return;
+    if (isFKeyPressed.current) return; // Skip if resizing brush
+    
+    let clientX, clientY;
+    if ('touches' in e) {
+        clientX = e.touches[0].clientX;
+        clientY = e.touches[0].clientY;
+    } else {
+        clientX = (e as React.MouseEvent).clientX;
+        clientY = (e as React.MouseEvent).clientY;
+    }
+
     const { u, v } = getUV(e);
+
+    // Update cursor position for preview via direct DOM for performance
+    if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
+      if (u < 0 || u > 1 || v < 0 || v > 1) {
+        cursorPreviewRef.current.style.display = 'none';
+      } else {
+        cursorPreviewRef.current.style.display = 'block';
+        cursorPreviewRef.current.style.left = `${u * 100}%`;
+        cursorPreviewRef.current.style.top = `${v * 100}%`;
+        cursorPreviewRef.current.style.width = `${(brushSettings.size / 1024) * 100}%`;
+        cursorPreviewRef.current.style.height = `${(brushSettings.size / 1024) * 100}%`;
+      }
+    }
+
+    if (isZooming && zoomStart.current) {
+        const deltaY = clientY - zoomStart.current.y;
+        // Drag Down -> Zoom Out, Drag Up -> Zoom In
+        // Sensitivity: 0.01 per pixel
+        const zoomSensitivity = 0.005;
+        const newScale = Math.max(0.1, Math.min(10, zoomStart.current.startScale * (1 - deltaY * zoomSensitivity)));
+        
+        setTransform(prev => ({
+            ...prev,
+            scale: newScale
+        }));
+        return;
+    }
+
+    if (isPanning && panStart.current) {
+         const startX = panStart.current.x;
+         const startY = panStart.current.y;
+         setTransform(prev => ({
+             ...prev,
+             x: clientX - startX,
+             y: clientY - startY
+         }));
+         return;
+    }
+
+    if (!isDrawing || !lastPos.current) return;
     stroke(u, v, lastPos.current.x, lastPos.current.y);
     lastPos.current = { x: u, y: v };
   };
 
   const handlePointerUp = () => {
+    if (isFKeyPressed.current) return; // Skip if resizing brush
+    
+    if (cursorPreviewRef.current) {
+      cursorPreviewRef.current.style.display = 'none';
+    }
+    if (isZooming) {
+        setIsZooming(false);
+        zoomStart.current = null;
+        return;
+    }
+
+    if (isPanning) {
+        setIsPanning(false);
+        panStart.current = null;
+        return;
+    }
+
     if (isDrawing) {
         saveHistory();
     }
@@ -870,21 +1097,43 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   };
 
   return (
-    <div className={`relative w-full h-full bg-neutral-900 overflow-hidden flex items-center justify-center ${className}`}>
-      <div className="relative shadow-2xl max-w-full max-h-full aspect-square">
+    <div 
+      className={`relative w-full h-full bg-neutral-900 overflow-hidden flex items-center justify-center ${className}`}
+      onWheel={handleWheel}
+    >
+      <div 
+        className="relative shadow-2xl max-w-full max-h-full aspect-square origin-center will-change-transform"
+        style={{ transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})` }}
+      >
         <canvas
           ref={canvasRef}
           width={1024}
           height={1024}
-          className={`block max-w-full max-h-full touch-none z-0 cursor-crosshair`}
+          className={`block max-w-full max-h-full touch-none z-0 ${activeTool === 'magic_wand' ? 'cursor-default' : 'cursor-none'}`}
           style={{ width: 'auto', height: 'auto', imageRendering: 'pixelated' }}
           onMouseDown={handlePointerDown}
           onMouseMove={handlePointerMove}
           onMouseUp={handlePointerUp}
-          onMouseLeave={handlePointerUp}
+          onMouseLeave={() => {
+            if (isFKeyPressed.current) return;
+            handlePointerUp();
+            if (cursorPreviewRef.current) cursorPreviewRef.current.style.display = 'none';
+          }}
           onTouchStart={handlePointerDown}
           onTouchMove={handlePointerMove}
           onTouchEnd={handlePointerUp}
+        />
+        {/* Brush Cursor Preview */}
+        <div 
+          ref={cursorPreviewRef}
+          className="absolute pointer-events-none border border-white rounded-full bg-white/20 z-30 hidden"
+          style={{
+            left: '0%',
+            top: '0%',
+            width: `${(brushSettings.size / 1024) * 100}%`,
+            height: `${(brushSettings.size / 1024) * 100}%`,
+            transform: 'translate(-50%, -50%)',
+          }}
         />
         {bgImageUrl && showReference && (
           <img 
@@ -895,7 +1144,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         )}
       </div>
       <div className="absolute top-2 left-2 bg-black/60 text-xs px-2 py-1 rounded pointer-events-none text-white/70 z-20">
-        Tool: {activeTool.toUpperCase().replace('_', ' ')} 
+        Tool: {activeTool.toUpperCase().replace('_', ' ')} | Zoom: {Math.round(transform.scale * 100)}%
       </div>
     </div>
   );

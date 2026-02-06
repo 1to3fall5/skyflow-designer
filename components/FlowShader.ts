@@ -125,14 +125,17 @@ export const FlowShaderMaterial = {
         // uCursor is passed in as the *Transformed* UV from raycasting
         float dist = distance(baseUV, uCursor);
         
-        // Simple single thin ring
-        float ringWidth = 0.001;
-        float ringAlpha = smoothstep(ringWidth + 0.001, ringWidth, abs(dist - uBrushSize));
-
-        // No fill to avoid obstruction
+        // Single ring + subtle fill
+        float ringWidth = 0.0005; // Even thinner stroke
+        float ringAlpha = smoothstep(ringWidth + 0.0005, ringWidth, abs(dist - uBrushSize));
         
-        // Mix White Ring
-        finalColor.rgb = mix(finalColor.rgb, vec3(1.0), ringAlpha);
+        // Semi-transparent fill
+        float fillAlpha = dist < uBrushSize ? 0.05 : 0.0; // Very subtle fill
+
+        // Mix White Ring and Fill
+        vec3 cursorColor = vec3(1.0);
+        finalColor.rgb = mix(finalColor.rgb, cursorColor, ringAlpha);
+        finalColor.rgb = mix(finalColor.rgb, cursorColor, fillAlpha);
       }
       
       gl_FragColor = finalColor;

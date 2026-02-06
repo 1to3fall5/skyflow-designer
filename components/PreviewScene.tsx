@@ -69,8 +69,8 @@ const SceneContent: React.FC<SceneContentProps> = ({
   
   // Update cursor style
   useEffect(() => {
-     gl.domElement.style.cursor = 'crosshair';
-  }, [gl]);
+     gl.domElement.style.cursor = activeTool === 'magic_wand' ? 'default' : 'none';
+  }, [gl, activeTool]);
 
   // Painting State (Raster)
   const isDragging = useRef(false);
@@ -546,6 +546,7 @@ interface PreviewSceneProps extends Omit<SceneContentProps, 'flowVersion' | 'pol
   polarAngle?: number;
   showFlowMap?: boolean;
   arrowDensity?: number;
+  onSetBrushSize?: (size: number) => void;
 }
 
 const PreviewScene: React.FC<PreviewSceneProps> = (props) => {

@@ -702,6 +702,7 @@ const App: React.FC = () => {
               magicWandThreshold={magicWandThreshold}
               showMaskOverlay={showMaskOverlay}
               onPaintingComplete={handlePaintingComplete}
+              onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
               projectionType={projectionType}
               polarAngle={polarAngle}
             />
