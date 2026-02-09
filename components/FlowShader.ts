@@ -24,6 +24,7 @@ export const FlowShaderMaterial = {
     // Polar Coverage Angle in Radians (PI/2 for Hemisphere, PI for Full Sphere)
     uPolarAngle: { value: Math.PI / 2 },
     uShowFlowMap: { value: 0.0 }, // 0.0 = false, 1.0 = true
+    uFlowMapOpacity: { value: 0.6 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -46,6 +47,7 @@ export const FlowShaderMaterial = {
     uniform float uProjectionType;
     uniform float uPolarAngle;
     uniform float uShowFlowMap;
+    uniform float uFlowMapOpacity;
     
     varying vec2 vUv;
 
@@ -115,9 +117,8 @@ export const FlowShaderMaterial = {
           // R = Flow X, G = Flow Y, B = 0, A = 1
           vec4 overlayColor = vec4(flowColor.rgb, 1.0);
           
-          // Blend it with the sky texture (e.g. 50% opacity)
-          // Or show it fully? Usually for debugging 50-70% is good
-          finalColor = mix(finalColor, overlayColor, 0.6);
+          // Blend it with the sky texture
+          finalColor = mix(finalColor, overlayColor, uFlowMapOpacity);
       }
 
       // --- Cursor Visualization ---

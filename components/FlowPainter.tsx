@@ -19,12 +19,15 @@ interface FlowPainterProps {
   magicWandThreshold?: number;
   showMaskOverlay?: boolean;
   showReference?: boolean;
+  referenceOpacity?: number;
 
   className?: string;
   onPaintingComplete?: () => void;
   onSetBrushSize?: (size: number) => void;
   projectionType?: ProjectionType;
   polarAngle?: number;
+  cursorUV?: {u: number, v: number} | null;
+  onCursorUpdate?: (uv: {u: number, v: number} | null) => void;
 }
 
 const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({ 
@@ -41,11 +44,14 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   magicWandThreshold = 20,
   showMaskOverlay = false,
   showReference = false,
+  referenceOpacity = 0.2,
   className,
   onPaintingComplete,
   onSetBrushSize,
   projectionType = 'equirectangular',
-  polarAngle = 90
+  polarAngle = 90,
+  cursorUV,
+  onCursorUpdate
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -956,6 +962,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     if (isFKeyPressed.current) return;
     
     const { u, v } = getUV(e);
+    onCursorUpdate?.({u, v});
 
     if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
       // Check bounds slightly loosely or just allow it to follow
@@ -1022,6 +1029,25 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     if (onPaintingComplete) onPaintingComplete();
   };
 
+  // Sync cursor from external source
+  useEffect(() => {
+    if (activeTool === 'magic_wand' || !cursorPreviewRef.current) return;
+    
+    if (cursorUV) {
+        const { u, v } = cursorUV;
+        // Check bounds
+        if (u >= -0.1 && u <= 1.1 && v >= -0.1 && v <= 1.1) {
+             cursorPreviewRef.current.style.display = 'block';
+             cursorPreviewRef.current.style.left = `${u * 100}%`;
+             cursorPreviewRef.current.style.top = `${v * 100}%`;
+             cursorPreviewRef.current.style.width = `${(brushSettings.size / 1024) * 100}%`;
+             cursorPreviewRef.current.style.height = `${(brushSettings.size / 1024) * 100}%`;
+        } else {
+             cursorPreviewRef.current.style.display = 'none';
+        }
+    }
+  }, [cursorUV, activeTool, brushSettings.size]);
+
   return (
     <div 
       className={`relative w-full h-full bg-neutral-900 overflow-hidden flex items-center justify-center ${className}`}
@@ -1042,8 +1068,12 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
           onPointerUp={handlePointerUp}
           onPointerLeave={() => {
             if (isFKeyPressed.current) return;
+            onCursorUpdate?.(null);
             if (!isDrawing) {
                 // Only hide cursor if not drawing (if drawing, we captured pointer, so keep showing)
+                // Also check if we have external cursorUV, if so, don't hide immediately?
+                // Actually, if we leave, we set shared to null.
+                // So the Effect will hide it eventually.
                 if (cursorPreviewRef.current) cursorPreviewRef.current.style.display = 'none';
             }
           }}
@@ -1059,12 +1089,21 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             transform: 'translate(-50%, -50%)',
           }}
         />
-        {bgImageUrl && showReference && (
-          <img 
-            src={bgImageUrl} 
-            alt="Guide" 
-            className="absolute inset-0 w-full h-full object-fill opacity-20 pointer-events-none select-none z-10"
-          />
+        {showReference && (
+          bgImageUrl ? (
+            <img 
+              src={bgImageUrl} 
+              alt="Guide" 
+              className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none z-10"
+              style={{ opacity: referenceOpacity }}
+            />
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none z-10">
+              <div className="bg-black/70 text-slate-300 px-4 py-2 rounded-lg backdrop-blur-sm border border-slate-700 text-sm flex items-center gap-2">
+                <span>⚠️ 请先上传参考图</span>
+              </div>
+            </div>
+          )
         )}
       </div>
       <div className="absolute top-2 left-2 bg-black/60 text-xs px-2 py-1 rounded pointer-events-none text-white/70 z-20">
