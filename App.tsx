@@ -24,7 +24,9 @@
     ArrowUp,
     ArrowDown,
     GripVertical,
-    Play
+    Play,
+    Move,
+    HelpCircle
   } from 'lucide-react';
   import FlowPainter from './components/FlowPainter';
   import PreviewScene from './components/PreviewScene';
@@ -120,11 +122,13 @@
                   </div>
               </div>
               
-              {/* Layer Settings (Blur) */}
+              {/* Layer Settings (Blur & Opacity) */}
               <div className={`space-y-2 overflow-hidden transition-all duration-200 ${activeLayerId === layer.id ? 'mt-3 max-h-20 opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
               <div className="h-px bg-[#2d2d33] w-full"></div>
+              
+              {/* Blur Slider */}
               <div className="flex items-center gap-3 pt-1">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase">模糊</span>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase w-8">模糊</span>
                   <input 
                       type="range" min="0" max="32"
                       value={layer.blur}
@@ -133,6 +137,19 @@
                       onPointerDown={(e) => e.stopPropagation()} // Prevent drag start on slider
                   />
                   <span className="text-[10px] font-mono text-indigo-400 w-6 text-right">{layer.blur}</span>
+              </div>
+
+              {/* Opacity Slider */}
+              <div className="flex items-center gap-3">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase w-8">透明度</span>
+                  <input 
+                      type="range" min="0" max="1" step="0.01"
+                      value={layer.opacity ?? 1}
+                      onChange={(e) => updateLayer(layer.id, { opacity: Number(e.target.value) })}
+                      className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      onPointerDown={(e) => e.stopPropagation()} // Prevent drag start on slider
+                  />
+                  <span className="text-[10px] font-mono text-indigo-400 w-6 text-right">{Math.round((layer.opacity ?? 1) * 100)}%</span>
               </div>
               </div>
           </div>
@@ -152,6 +169,7 @@
     const [viewMode, setViewMode] = useState<ViewMode>('3d');
     const [showArrows, setShowArrows] = useState(true); 
     const [showFlowMap, setShowFlowMap] = useState(false);
+    const [showShortcuts, setShowShortcuts] = useState(false);
     const [showReference, setShowReference] = useState(false);
     const [referenceOpacity, setReferenceOpacity] = useState(0.2);
     const [projectionType, setProjectionType] = useState<ProjectionType>('equirectangular');
@@ -349,6 +367,67 @@
       }
     }, []);
 
+      // Brush Adjustment Logic (CTRL + F + Mouse Move)
+      const isAdjustingBrushStrength = useRef(false);
+      const lastMouseX = useRef(0);
+
+      useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Toggle shortcuts help
+      if (e.key === '?' || e.key === '/') {
+        // Prevent default only if it's not a textarea/input
+        if (!(document.activeElement instanceof HTMLInputElement) && 
+            !(document.activeElement instanceof HTMLTextAreaElement)) {
+          e.preventDefault();
+          setShowShortcuts(prev => !prev);
+        }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        isAdjustingBrushStrength.current = true;
+      }
+    };
+
+        const handleKeyUp = (e: KeyboardEvent) => {
+          if (e.key.toLowerCase() === 'f' || e.key === 'Control' || e.key === 'Meta') {
+            isAdjustingBrushStrength.current = false;
+          }
+        };
+
+        const handleMouseMove = (e: MouseEvent) => {
+          if (isAdjustingBrushStrength.current) {
+             const delta = e.movementX;
+             setBrushSettings(prev => {
+                const newStrength = Math.min(Math.max(prev.strength + delta * 0.005, 0.01), 1.0);
+                return { ...prev, strength: newStrength };
+             });
+
+             // Update cursor UV even during strength adjustment to prevent jumping
+             if (flowPainterRef.current) {
+               const canvas = flowPainterRef.current.getCanvas();
+               if (canvas) {
+                 const rect = canvas.getBoundingClientRect();
+                 const u = (e.clientX - rect.left) / rect.width;
+                 const v = (e.clientY - rect.top) / rect.height;
+                 setSharedCursorUV({ u, v });
+               }
+             }
+          }
+          lastMouseX.current = e.clientX;
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('keyup', handleKeyUp);
+        window.addEventListener('mousemove', handleMouseMove);
+
+        return () => {
+          window.removeEventListener('keydown', handleKeyDown);
+          window.removeEventListener('keyup', handleKeyUp);
+          window.removeEventListener('mousemove', handleMouseMove);
+        };
+      }, []);
+
     // Keyboard shortcuts
     useEffect(() => {
       const handleMouseDown = (e: MouseEvent) => {
@@ -405,8 +484,12 @@
           case 'm': // Magic Wand
             setActiveTool('magic_wand');
             break;
-          case 'v': // Toggle Arrows
+          case 'a': // Toggle Arrows
             setShowArrows(prev => !prev);
+            break;
+          case ' ': // Space: Toggle Flow Animation
+            e.preventDefault(); // Prevent page scrolling
+            setIsAnimating(prev => !prev);
             break;
         }
       };
@@ -430,6 +513,123 @@
           className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-300 ease-in-out ${checked ? 'translate-x-[22px]' : 'translate-x-[2px]'}`} 
         />
       </button>
+    );
+
+    // Unified Toolbar Component
+    const UnifiedToolbar = () => (
+      <div 
+        className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 flex flex-wrap justify-center items-center gap-3 w-max max-w-[95vw] p-1 pointer-events-auto"
+        onMouseDown={(e) => e.stopPropagation()} // Stop propagation to prevent canvas drag
+        onPointerDown={(e) => e.stopPropagation()} // Stop pointer events for touch/pen
+        onWheel={(e) => e.stopPropagation()} // Prevent zooming when scrolling toolbar
+      >
+          {/* Reference Image Controls (2D Related but global toggle) */}
+          <div className="flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
+              <button 
+                  onClick={() => setShowReference(!showReference)}
+                  className={`p-1.5 rounded-lg transition-colors ${showReference ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                  title="显示贴图"
+              >
+                  <ImageIcon size={16} />
+              </button>
+              {showReference && (
+                  <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">透明度</span>
+                      <input 
+                          type="range" min="0" max="1" step="0.05"
+                          value={referenceOpacity}
+                          onChange={(e) => setReferenceOpacity(Number(e.target.value))}
+                          className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                          title="透明度"
+                      />
+                      <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{(referenceOpacity * 100).toFixed(0)}%</span>
+                  </div>
+              )}
+          </div>
+
+          {/* Animation */}
+          <div className="flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
+              <button 
+                  onClick={() => setIsAnimating(!isAnimating)}
+                  className={`p-1.5 rounded-lg transition-colors ${isAnimating ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                  title="动画开关"
+              >
+                  <Play size={16} fill={isAnimating ? "currentColor" : "none"} />
+              </button>
+              <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">速度</span>
+                  <input 
+                      type="range" min="0" max="2" step="0.05"
+                      value={previewSpeed}
+                      onChange={(e) => setPreviewSpeed(Number(e.target.value))}
+                      className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      title="速度"
+                  />
+              </div>
+              <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">强度</span>
+                  <input 
+                      type="range" min="0" max="0.5" step="0.01"
+                      value={previewDistortion}
+                      onChange={(e) => setPreviewDistortion(Number(e.target.value))}
+                      className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      title="强度"
+                  />
+              </div>
+          </div>
+
+          {/* Arrows */}
+          <div className="flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
+              <button 
+                  onClick={() => setShowArrows(!showArrows)}
+                  className={`p-1.5 rounded-lg transition-colors ${showArrows ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                  title="显示箭头"
+              >
+                  <Wind size={16} />
+              </button>
+              <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">方向</span>
+                  <input 
+                      type="range" min="0" max="360"
+                      value={windDirection}
+                      onChange={(e) => setWindDirection(Number(e.target.value))}
+                      className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      title="方向"
+                  />
+              </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">密度</span>
+                  <input 
+                      type="range" min="16" max="128" step="4"
+                      value={arrowDensity}
+                      onChange={(e) => setArrowDensity(Number(e.target.value))}
+                      className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      title="密度"
+                  />
+              </div>
+          </div>
+
+          {/* Overlay */}
+          <div className="flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
+              <button 
+                  onClick={() => setShowFlowMap(!showFlowMap)}
+                  className={`p-1.5 rounded-lg transition-colors ${showFlowMap ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                  title="显示叠加"
+              >
+                  <Layers size={16} />
+              </button>
+              <div className="flex items-center gap-2">
+                  <input 
+                      type="range" min="0" max="1" step="0.05"
+                      value={flowMapOpacity}
+                      onChange={(e) => setFlowMapOpacity(Number(e.target.value))}
+                      className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                      title="透明度"
+                  />
+                  <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{(flowMapOpacity * 100).toFixed(0)}%</span>
+              </div>
+          </div>
+      </div>
     );
 
     return (
@@ -635,40 +835,168 @@
 
           {/* Main Canvas Area */}
           <div className="flex-1 relative bg-neutral-950 flex overflow-hidden">
+            <div 
+              className="absolute top-4 left-1/2 transform -translate-x-1/2 z-30 flex flex-wrap justify-center items-center gap-3 w-max max-w-[95vw] p-1 pointer-events-auto"
+              onMouseDown={(e) => e.stopPropagation()} // Stop propagation to prevent canvas drag
+              onPointerDown={(e) => e.stopPropagation()} // Stop pointer events for touch/pen
+              onWheel={(e) => e.stopPropagation()} // Prevent zooming when scrolling toolbar
+            >
+                {/* Unified Toolbar Controls */}
+                <div className="flex items-center gap-2 bg-[#18181b]/50 backdrop-blur-md p-1.5 rounded-xl border border-[#2d2d33] shadow-xl pointer-events-auto">
+                    {/* Left Group: Reference & Overlay */}
+                    {viewMode !== '3d' && (
+                        <div className="relative group flex items-center">
+                            <button 
+                                onClick={() => setShowReference(!showReference)}
+                                className={`p-1.5 rounded-lg transition-colors ${showReference ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                                title="显示贴图"
+                            >
+                                <ImageIcon size={16} />
+                            </button>
+                            {showReference && (
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 pt-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                                    <div className="bg-[#18181b] border border-[#2d2d33] rounded-lg p-3 shadow-xl flex flex-col gap-2 min-w-[140px]">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">透明度</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{(referenceOpacity * 100).toFixed(0)}%</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="1" step="0.05"
+                                            value={referenceOpacity}
+                                            onChange={(e) => setReferenceOpacity(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {viewMode !== '2d' && (
+                        <div className="relative group flex items-center">
+                            <button 
+                                onClick={() => setShowFlowMap(!showFlowMap)}
+                                className={`p-1.5 rounded-lg transition-colors ${showFlowMap ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                                title="显示叠加"
+                            >
+                                <Layers size={16} />
+                            </button>
+                            {showFlowMap && (
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 pt-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                                    <div className="bg-[#18181b] border border-[#2d2d33] rounded-lg p-3 shadow-xl flex flex-col gap-2 min-w-[140px]">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">透明度</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{(flowMapOpacity * 100).toFixed(0)}%</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="1" step="0.05"
+                                            value={flowMapOpacity}
+                                            onChange={(e) => setFlowMapOpacity(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Middle: Animation */}
+                    <div className="relative group flex items-center">
+                        <button 
+                            onClick={() => setIsAnimating(!isAnimating)}
+                            className={`p-1.5 rounded-lg transition-colors ${isAnimating ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                            title="动画开关"
+                        >
+                            <Play size={16} fill={isAnimating ? "currentColor" : "none"} />
+                        </button>
+                        {isAnimating && (
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 pt-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                                <div className="bg-[#18181b] border border-[#2d2d33] rounded-lg p-3 shadow-xl flex flex-col gap-3 min-w-[140px]">
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">速度</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{previewSpeed.toFixed(2)}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="2" step="0.05"
+                                            value={previewSpeed}
+                                            onChange={(e) => setPreviewSpeed(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">强度</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{previewDistortion.toFixed(2)}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="0.5" step="0.01"
+                                            value={previewDistortion}
+                                            onChange={(e) => setPreviewDistortion(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Right: Arrows */}
+                    <div className="relative group flex items-center">
+                        <button 
+                            onClick={() => setShowArrows(!showArrows)}
+                            className={`p-1.5 rounded-lg transition-colors ${showArrows ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
+                            title="显示箭头"
+                        >
+                            <Move size={16} />
+                        </button>
+                        {showArrows && (
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 mt-2 pt-2 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50">
+                                <div className="bg-[#18181b] border border-[#2d2d33] rounded-lg p-3 shadow-xl flex flex-col gap-3 min-w-[140px]">
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">方向</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{windDirection}°</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="0" max="360"
+                                            value={windDirection}
+                                            onChange={(e) => setWindDirection(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">密度</span>
+                                            <span className="text-[10px] text-indigo-400 font-mono">{arrowDensity}</span>
+                                        </div>
+                                        <input 
+                                            type="range" min="16" max="128" step="4"
+                                            value={arrowDensity}
+                                            onChange={(e) => setArrowDensity(Number(e.target.value))}
+                                            className="w-full h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Overlay */}
+            </div>
+
+
             {/* 2D View */}
             <div 
               className={`
-                relative transition-all duration-300 ease-in-out border-r border-slate-800
-                ${viewMode === '2d' ? 'w-full' : viewMode === '3d' ? 'w-0 hidden' : 'w-1/2'}
+                relative overflow-hidden border-r border-slate-800 transition-all duration-500 ease-[cubic-bezier(0.25,0.1,0.25,1.0)] will-change-[flex-grow]
+                ${viewMode === '3d' ? 'flex-[0] border-none opacity-0 pointer-events-none' : 'flex-[1] opacity-100'}
+                min-w-0
               `}
             >
-              {/* 2D Toolbar Overlay */}
-              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-10 flex flex-row items-center gap-3">
-                  <div className="flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
-                      <button 
-                          onClick={() => setShowReference(!showReference)}
-                          className={`p-1.5 rounded-lg transition-colors ${showReference ? 'bg-indigo-500 text-white' : 'text-slate-400 hover:bg-[#323238]'}`}
-                          title="显示贴图"
-                      >
-                          <ImageIcon size={16} />
-                      </button>
-                      {showReference && (
-                          <div className="flex items-center gap-2">
-                              <span className="text-[10px] text-slate-400 font-medium uppercase tracking-wider whitespace-nowrap">透明度</span>
-                              <input 
-                                  type="range" min="0" max="1" step="0.05"
-                                  value={referenceOpacity}
-                                  onChange={(e) => setReferenceOpacity(Number(e.target.value))}
-                                  className="w-20 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-indigo-500"
-                                  title="透明度"
-                              />
-                              <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{(referenceOpacity * 100).toFixed(0)}%</span>
-                          </div>
-                      )}
-                  </div>
-              </div>
-
-              <FlowPainter 
+              <div className="absolute inset-0">
+                <FlowPainter 
                 ref={flowPainterRef}
                 activeTool={activeTool}
                 brushSettings={brushSettings} 
@@ -692,18 +1020,44 @@
                 polarAngle={polarAngle}
                 cursorUV={sharedCursorUV}
                 onCursorUpdate={setSharedCursorUV}
+                showArrows={showArrows}
+                arrowDensity={arrowDensity}
               />
+              </div>
             </div>
 
             {/* 3D View */}
             <div 
               className={`
-                relative transition-all duration-300 ease-in-out
-                ${viewMode === '3d' ? 'w-full' : viewMode === '2d' ? 'w-0 hidden' : 'w-1/2'}
+                relative overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.25,0.1,0.25,1.0)] will-change-[flex-grow] flex items-center justify-center bg-neutral-950
+                ${viewMode === '2d' ? 'flex-[0] opacity-0 pointer-events-none' : 'flex-[1] opacity-100'}
+                min-w-0
               `}
             >
-              {/* 3D Toolbar Overlay */}
-              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-10 flex flex-row items-center gap-3">
+              <div className={`relative w-full h-full ${viewMode === 'split' ? 'aspect-square max-h-full max-w-full' : ''} transition-all duration-500`}>
+                <PreviewScene 
+                  skyTextureUrl={skyTextureUrl}
+                  flowCanvas={flowCanvas}
+                  speed={isAnimating ? previewSpeed : 0}
+                  distortion={previewDistortion}
+                  brushSettings={brushSettings}
+                  isPaintMode={showArrows}
+                  activeTool={activeTool}
+                  flowVersion={flowVersion}
+                  onPaint={handle3DPaint}
+                  onPaintEnd={handle3DPaintEnd}
+                  projectionType={projectionType}
+                  polarAngle={polarAngle}
+                  arrowDensity={arrowDensity}
+                  showFlowMap={showFlowMap}
+                  flowMapOpacity={flowMapOpacity}
+                  onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
+                  cursorUV={sharedCursorUV}
+                  onCursorUpdate={setSharedCursorUV}
+                />
+
+                {/* 3D Toolbar Overlay */}
+                <div className="hidden">
 
 
                 {/* Global Settings Panel */}
@@ -798,10 +1152,94 @@
 
                 </div>
               </div>
+            </div>
+            </div>
 
-              {/* Bottom Center Brush Settings */}
-              {activeTool !== 'magic_wand' && (
-                  <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 z-10 flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-4 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
+            {/* Top Left Tools Container */}
+            <div className="absolute top-4 left-4 z-10 flex items-start gap-3 pointer-events-none">
+                {/* Help Button & Shortcuts Panel */}
+                <div className="flex flex-col items-start gap-2 pointer-events-auto relative">
+                    {/* Toggle Button */}
+                    <button 
+                      onClick={() => setShowShortcuts(!showShortcuts)}
+                      className={`p-2 rounded-xl backdrop-blur-md border transition-all duration-300 shadow-xl ${showShortcuts ? 'bg-indigo-500 text-white border-indigo-400' : 'bg-[#18181b]/80 text-slate-400 border-[#2d2d33] hover:text-white hover:bg-[#2d2d33]'}`}
+                      title={showShortcuts ? "收起快捷键" : "快捷键说明"}
+                    >
+                      <HelpCircle size={20} />
+                    </button>
+
+                    {/* Shortcuts Panel */}
+                    <div className={`absolute top-full left-0 mt-2 bg-[#18181b]/90 backdrop-blur-md p-4 rounded-2xl border border-[#2d2d33] shadow-2xl w-[220px] max-h-[calc(100vh-120px)] overflow-y-auto transition-all duration-300 origin-top-left ${showShortcuts ? 'opacity-100 scale-100 visible' : 'opacity-0 scale-90 invisible'}`}>
+                      <div className="space-y-4">
+                        {/* Shortcuts & Help */}
+                        <div className="space-y-2 text-[10px] text-slate-300">
+                          <div className="flex items-center justify-between mb-2">
+                            <strong className="text-slate-400 uppercase tracking-wider text-[9px] font-bold">快捷键</strong>
+                            <span className="text-[9px] text-slate-500 px-1.5 py-0.5 rounded bg-[#323238]">? / /</span>
+                          </div>
+                          <ul className="space-y-1 text-slate-400">
+                            <li 
+                              onClick={() => { setActiveTool('brush'); setBrushSettings(prev => ({ ...prev, isEraser: false })); }}
+                              className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'brush' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
+                            >
+                              <span className="font-medium">画笔模式</span> 
+                              <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'brush' ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>B</span>
+                            </li>
+                            <li 
+                              onClick={() => { setActiveTool('eraser'); setBrushSettings(prev => ({ ...prev, isEraser: true })); }}
+                              className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'eraser' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
+                            >
+                              <span className="font-medium">橡皮擦</span> 
+                              <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'eraser' ? 'bg-rose-500 text-white' : 'text-rose-400 bg-[#323238]'}`}>E</span>
+                            </li>
+                            <li 
+                              onClick={() => setActiveTool('magic_wand')}
+                              className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'magic_wand' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
+                            >
+                              <span className="font-medium">选取工具</span> 
+                              <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'magic_wand' ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>M</span>
+                            </li>
+                            <li 
+                              onClick={() => setShowArrows(prev => !prev)}
+                              className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${showArrows ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
+                            >
+                              <span className="font-medium">显示箭头</span> 
+                              <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${showArrows ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>A</span>
+                            </li>
+                            <li className="h-px bg-[#2d2d33] my-1"></li>
+                            <li className="flex items-center justify-between gap-2">
+                              <span className="font-medium">笔刷大小</span> 
+                              <span className="text-indigo-400 bg-[#323238] px-1 py-0.5 rounded text-[9px] font-bold">F + 拖拽</span>
+                            </li>
+                            <li className="flex items-center justify-between gap-2">
+                              <span className="font-medium">笔刷强度</span> 
+                              <span className="text-indigo-400 bg-[#323238] px-1 py-0.5 rounded text-[9px] font-bold">Ctrl+F + 拖拽</span>
+                            </li>
+                            <li className="h-px bg-[#2d2d33] my-1"></li>
+                            <li className="flex items-center justify-between gap-2"><span>2D 视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">1</span></li>
+                            <li className="flex items-center justify-between gap-2"><span>分屏视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">2</span></li>
+                            <li className="flex items-center justify-between gap-2"><span>3D 视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">3</span></li>
+                          </ul>
+                        </div>
+                        <div className="h-px bg-[#2d2d33]"></div>
+                        <div>
+                          <strong className="text-slate-400 block mb-1.5 uppercase tracking-wider text-[9px] font-bold">交互操作</strong>
+                          <ul className="space-y-1 text-slate-400 text-[10px]">
+                            <li className="flex items-center justify-between gap-2"><span>绘制/移动</span> <span className="text-slate-300 font-medium">左键</span></li>
+                            <li className="flex items-center justify-between gap-2"><span>平移/旋转</span> <span className="text-slate-300 font-medium">中键</span></li>
+                            <li className="flex items-center justify-between gap-2"><span>缩放视图</span> <span className="text-slate-300 font-medium">滚轮</span></li>
+                            <li className="flex items-center justify-between gap-2"><span>重置笔刷</span> <span className="text-slate-300 font-medium">F (单击)</span></li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Brush Settings - Bottom Center */}
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center justify-center gap-3 pointer-events-none">
+                {activeTool !== 'magic_wand' && (
+                  <div className="pointer-events-auto flex items-center gap-3 bg-[#18181b]/50 backdrop-blur-md px-2 py-2 rounded-xl border border-[#2d2d33] shadow-xl">
                       <button 
                           onClick={() => {
                               const newTool = activeTool === 'brush' ? 'eraser' : 'brush';
@@ -834,87 +1272,16 @@
                           <span className="text-[10px] text-indigo-400 font-mono min-w-[3ch] text-right">{(brushSettings.strength * 100).toFixed(0)}%</span>
                       </div>
                   </div>
-              )}
-
-              {/* Controls & Tools Overlay */}
-              <div className="absolute bottom-4 left-4 z-10 bg-[#18181b]/50 backdrop-blur-md p-3 rounded-2xl border border-[#2d2d33] shadow-2xl w-[200px] max-h-[calc(100vh-120px)] overflow-y-auto">
-                <div className="space-y-4">
-                  {/* Shortcuts & Help */}
-                  <div className="space-y-2 text-[10px] text-slate-300">
-                    <div>
-                    <strong className="text-slate-400 block mb-1.5 uppercase tracking-wider text-[9px] font-bold">快捷键</strong>
-                    <ul className="space-y-1 text-slate-400">
-                      <li 
-                        onClick={() => { setActiveTool('brush'); setBrushSettings(prev => ({ ...prev, isEraser: false })); }}
-                        className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'brush' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
-                      >
-                        <span className="font-medium">画笔模式</span> 
-                        <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'brush' ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>B</span>
-                      </li>
-                      <li 
-                        onClick={() => { setActiveTool('eraser'); setBrushSettings(prev => ({ ...prev, isEraser: true })); }}
-                        className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'eraser' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
-                      >
-                        <span className="font-medium">橡皮擦</span> 
-                        <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'eraser' ? 'bg-rose-500 text-white' : 'text-rose-400 bg-[#323238]'}`}>E</span>
-                      </li>
-                      <li 
-                        onClick={() => setActiveTool('magic_wand')}
-                        className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${activeTool === 'magic_wand' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
-                      >
-                        <span className="font-medium">选取</span> 
-                        <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${activeTool === 'magic_wand' ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>M</span>
-                      </li>
-                      <li 
-                        onClick={() => setShowArrows(prev => !prev)}
-                        className={`flex items-center justify-between gap-2 cursor-pointer p-1 rounded-md transition-all ${showArrows ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'hover:bg-[#323238] border border-transparent'}`}
-                      >
-                        <span className="font-medium">显示箭头</span> 
-                        <span className={`font-bold px-1 py-0.5 rounded text-[9px] ${showArrows ? 'bg-indigo-500 text-white' : 'text-indigo-400 bg-[#323238]'}`}>V</span>
-                      </li>
-                      <li className="flex items-center justify-between gap-2 pt-1 border-t border-[#2d2d33] mt-1"><span>2D视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">1</span></li>
-                      <li className="flex items-center justify-between gap-2"><span>分屏视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">2</span></li>
-                      <li className="flex items-center justify-between gap-2"><span>3D视图</span> <span className="text-slate-300 font-bold bg-[#323238] px-1 py-0.5 rounded text-[9px]">3</span></li>
-                    </ul>
-                  </div>
-                  <div className="h-px bg-[#2d2d33]"></div>
-                  <div>
-                    <strong className="text-slate-400 block mb-1.5 uppercase tracking-wider text-[9px] font-bold">鼠标操作</strong>
-                    <ul className="space-y-1 text-slate-400">
-                      <li className="flex items-center justify-between gap-2"><span>绘制</span> <span className="text-slate-300">左键拖拽</span></li>
-                      <li className="flex items-center justify-between gap-2"><span>旋转视图</span> <span className="text-slate-300">中键拖拽</span></li>
-                      <li className="flex items-center justify-between gap-2"><span>缩放</span> <span className="text-slate-300">滚轮</span></li>
-                    </ul>
-                  </div>
-                </div>
+                )}
               </div>
-              </div>
-
-              <PreviewScene 
-                skyTextureUrl={skyTextureUrl}
-                flowCanvas={flowCanvas}
-                speed={isAnimating ? previewSpeed : 0}
-                distortion={previewDistortion}
-                brushSettings={brushSettings}
-                isPaintMode={showArrows}
-                activeTool={activeTool}
-                flowVersion={flowVersion}
-                onPaint={handle3DPaint}
-                onPaintEnd={handle3DPaintEnd}
-                projectionType={projectionType}
-                polarAngle={polarAngle}
-                arrowDensity={arrowDensity}
-            showFlowMap={showFlowMap}
-            flowMapOpacity={flowMapOpacity}
-            onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
-            cursorUV={sharedCursorUV}
-            onCursorUpdate={setSharedCursorUV}
-          />
-        </div>
           </div>
         </main>
-      </div>
-    );
-  };
 
-  export default App;
+
+
+
+      </div>
+  );
+};
+
+export default App;

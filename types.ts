@@ -33,4 +33,6 @@ export interface FlowPainterHandle {
   redo: () => void;
   saveHistory: () => void;
   clearLayer: (id: string) => void;
+  renderComposite: () => void;
+  getCanvas: () => HTMLCanvasElement | null;
 }

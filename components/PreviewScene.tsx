@@ -138,6 +138,9 @@ const SceneContent: React.FC<SceneContentProps> = ({
          }
          materialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
       }
+
+      // Update brush strength uniform
+      materialRef.current.uniforms.uBrushStrength.value = brushSettings.strength;
     }
     if (arrowMaterialRef.current) {
       if (materialRef.current?.uniforms.uFlowMap.value.needsUpdate) {
@@ -512,6 +515,9 @@ const UEControls = ({
     const handleMouseMove = (e: MouseEvent) => {
       // Handle Brush Resize
       if (isFKeyPressed.current && onSetBrushSize) {
+          // If Ctrl/Meta is pressed, we are likely adjusting strength (handled in App.tsx), so skip size adjustment
+          if (e.ctrlKey || e.metaKey) return;
+
           if (ignoreNextMove.current) {
               ignoreNextMove.current = false;
               return;
@@ -641,6 +647,7 @@ const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
   return (
     <div className={`relative w-full h-full ${props.className}`}>
       <Canvas 
+        resize={{ debounce: 0 }} // Force immediate resize during layout transitions to prevent lag
         flat 
         camera={{ position: [0, 0, 0.1], fov: 75 }} 
         gl={{ preserveDrawingBuffer: true }}

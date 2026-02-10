@@ -20,6 +20,8 @@ interface FlowPainterProps {
   showMaskOverlay?: boolean;
   showReference?: boolean;
   referenceOpacity?: number;
+  showArrows?: boolean;
+  arrowDensity?: number;
 
   className?: string;
   onPaintingComplete?: () => void;
@@ -45,6 +47,8 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   showMaskOverlay = false,
   showReference = false,
   referenceOpacity = 0.2,
+  showArrows = true,
+  arrowDensity = 48,
   className,
   onPaintingComplete,
   onSetBrushSize,
@@ -61,6 +65,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   
   const cursorPreviewRef = useRef<HTMLDivElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const arrowCanvasRef = useRef<HTMLCanvasElement | null>(null);
   
   const seamlessHelperRef = useRef<HTMLCanvasElement | null>(null);
   const redOverlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -86,6 +91,79 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
       }
       return c;
   };
+
+  const drawArrows = useCallback(() => {
+    if (!arrowCanvasRef.current || !flowMapRef.current) return;
+    
+    const ctx = arrowCanvasRef.current.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, arrowCanvasRef.current.width, arrowCanvasRef.current.height);
+
+    if (!showArrows) return;
+
+    const width = flowMapRef.current.width;
+    const height = flowMapRef.current.height;
+    
+    // Create temp context to read data if needed, or just use flowMapRef
+    const flowCtx = flowMapRef.current.getContext('2d');
+    if (!flowCtx) return;
+
+    // Get image data - this might be expensive so we do it sparingly
+    const imageData = flowCtx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    const step = Math.max(16, 128 - arrowDensity); // Density 16-128 -> Step large-small
+    
+    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.lineWidth = 1;
+
+    for (let y = step / 2; y < height; y += step) {
+        for (let x = step / 2; x < width; x += step) {
+            const i = (Math.floor(y) * width + Math.floor(x)) * 4;
+            const r = data[i];     // X flow: 0(left) - 255(right) ? Check shader logic
+            const g = data[i + 1]; // Y flow
+            
+            // Decode flow: 128 is 0. <128 is negative, >128 is positive.
+            // In shader/paint logic: 
+            // r = 128 - vx * range  => vx = (128 - r) / range
+            // g = 128 + vy * range  => vy = (g - 128) / range
+            
+            const vx = (128 - r) / 127.0; 
+            const vy = (g - 128) / 127.0;
+
+            const rawLen = Math.sqrt(vx*vx + vy*vy);
+            if (r === 128 && g === 128) continue;
+
+            const angle = Math.atan2(vy, vx); // Keep UV angle for drawing on 2D map
+            const arrowLen = Math.min(step * 0.8, rawLen * step * 2.0);
+
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angle);
+            
+            // Draw Arrow
+            ctx.beginPath();
+            ctx.moveTo(-arrowLen/2, 0);
+            ctx.lineTo(arrowLen/2, 0);
+            ctx.stroke();
+
+            // Arrow head
+            ctx.beginPath();
+            ctx.moveTo(arrowLen/2, 0);
+            ctx.lineTo(arrowLen/2 - 4, -3);
+            ctx.lineTo(arrowLen/2 - 4, 3);
+            ctx.fill();
+
+            ctx.restore();
+        }
+    }
+  }, [showArrows, arrowDensity]);
+
+  useEffect(() => {
+    drawArrows();
+  }, [drawArrows]); // This will trigger when arrowDensity changes because drawArrows depends on it
 
   // Load Reference Image for Magic Wand
   useEffect(() => {
@@ -229,6 +307,8 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         const layerCanvas = layersMap.get(layer.id);
         if (!layerCanvas) return;
 
+        const currentOpacity = layer.opacity ?? 1;
+
         if (layer.isObstacle && obsHelperCtx) {
             // -- Obstacle Rendering Logic --
             // We want to draw the layer's shape, but force the color to Neutral (128, 128, 0).
@@ -254,25 +334,35 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             obsHelperCtx.globalCompositeOperation = 'source-over'; // Reset
 
             // 4. Draw result to Flow Map
+            flowCtx.save();
+            flowCtx.globalAlpha = currentOpacity;
             flowCtx.drawImage(obstacleHelper, 0, 0);
+            flowCtx.restore();
 
             // 5. Add to Combined Obstacle Mask (for Red Overlay)
             if (combinedObstacleCtx) {
+                 combinedObstacleCtx.save();
+                 combinedObstacleCtx.globalAlpha = currentOpacity;
                  combinedObstacleCtx.drawImage(obstacleHelper, 0, 0);
+                 combinedObstacleCtx.restore();
             }
 
         } else {
             // -- Normal Flow Rendering Logic --
+            flowCtx.save();
+            flowCtx.globalAlpha = currentOpacity;
             if (layer.blur > 0) {
                 drawBlurred(flowCtx, layerCanvas, layer.blur);
             } else {
                 flowCtx.drawImage(layerCanvas, 0, 0);
             }
+            flowCtx.restore();
         }
     });
 
     // Update the 3D Texture
     onTextureUpdate(flowMapRef.current);
+    drawArrows();
 
     // Render to Display Canvas
     ctx.drawImage(flowMapRef.current, 0, 0);
@@ -300,7 +390,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     }
     
     renderPendingRef.current = false;
-  }, [onTextureUpdate, globalLayerVisible, showMaskOverlay, layers, drawBlurred]);
+  }, [onTextureUpdate, drawArrows, globalLayerVisible, showMaskOverlay, layers, drawBlurred]);
 
   const renderComposite = useCallback(() => {
     if (renderPendingRef.current) return;
@@ -417,6 +507,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   const hasResizedBrush = useRef(false);
   const fKeyAccumulatedMovement = useRef(0);
   const currentBrushSizeRef = useRef(brushSettings.size);
+  const fKeyPressTime = useRef(0);
 
   useEffect(() => {
     currentBrushSizeRef.current = brushSettings.size;
@@ -436,7 +527,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                   isFKeyPressed.current = true;
                   hasResizedBrush.current = false;
                   fKeyAccumulatedMovement.current = 0;
-                  canvasRef.current?.requestPointerLock();
+                  fKeyPressTime.current = Date.now();
               }
               return;
           }
@@ -446,12 +537,14 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
           const key = e.key.toLowerCase();
           if (key === 'f') {
               isFKeyPressed.current = false;
-              if (document.pointerLockElement === canvasRef.current) {
-                  document.exitPointerLock();
-              }
-              if (!hasResizedBrush.current) {
+              
+              const pressDuration = Date.now() - fKeyPressTime.current;
+              // Only reset view if it was a quick tap (<200ms) and no resize happened
+              // This prevents accidental view resets when user holds F but doesn't move mouse much
+              if (!hasResizedBrush.current && pressDuration < 200) {
                   resetView();
               }
+              
               hasResizedBrush.current = false;
               fKeyAccumulatedMovement.current = 0;
               return;
@@ -468,12 +561,36 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
   useEffect(() => {
      const handleGlobalMouseMove = (e: MouseEvent) => {
+       // Always update cursor position if F is pressed to prevent jumping
+       if (isFKeyPressed.current) {
+         const canvas = canvasRef.current;
+         if (canvas) {
+           const rect = canvas.getBoundingClientRect();
+           const u = (e.clientX - rect.left) / rect.width;
+           const v = (e.clientY - rect.top) / rect.height;
+           onCursorUpdate?.({ u, v });
+
+           if (cursorPreviewRef.current && activeTool !== 'magic_wand') {
+             if (u >= -0.1 && u <= 1.1 && v >= -0.1 && v <= 1.1) {
+               cursorPreviewRef.current.style.display = 'block';
+               cursorPreviewRef.current.style.left = `${u * 100}%`;
+               cursorPreviewRef.current.style.top = `${v * 100}%`;
+             } else {
+               cursorPreviewRef.current.style.display = 'none';
+             }
+           }
+         }
+       }
+
        if (isFKeyPressed.current && onSetBrushSize) {
+         // If Ctrl/Meta is pressed, we are likely adjusting strength (handled in App.tsx), so skip size adjustment
+         if (e.ctrlKey || e.metaKey) return;
+
          const dx = e.movementX;
          const dy = e.movementY;
          fKeyAccumulatedMovement.current += Math.abs(dx) + Math.abs(dy);
          
-         if (fKeyAccumulatedMovement.current > 5 || hasResizedBrush.current) {
+         if (fKeyAccumulatedMovement.current > 10 || hasResizedBrush.current) {
            hasResizedBrush.current = true;
            const newSize = Math.max(1, Math.min(200, currentBrushSizeRef.current + dx * 0.5));
            onSetBrushSize(newSize);
@@ -489,7 +606,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
      window.addEventListener('mousemove', handleGlobalMouseMove);
      return () => window.removeEventListener('mousemove', handleGlobalMouseMove);
-   }, [onSetBrushSize]);
+   }, [onSetBrushSize, activeTool, onCursorUpdate]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
       const zoomSensitivity = 0.001;
@@ -731,8 +848,10 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     undo,
     redo,
     saveHistory,
-    clearLayer
-  }));
+    clearLayer,
+    renderComposite,
+    getCanvas: () => canvasRef.current
+  }), [stroke, floodFill, undo, redo, saveHistory, clearLayer, renderComposite]);
 
   // Track previous triggers
   const lastWindTrigger = useRef<number | null>(null);
@@ -880,7 +999,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     ctx.putImageData(imageData, 0, 0);
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
-  }, [windTrigger, windDirection, renderComposite, onPaintingComplete, projectionType, polarAngle]);
+  }, [windTrigger, windDirection, renderComposite, onPaintingComplete, projectionType, polarAngle, drawArrows]);
 
   // Handle Reset
   useEffect(() => {
@@ -1078,9 +1197,16 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             }
           }}
         />
+        <canvas
+          ref={arrowCanvasRef}
+          width={1024}
+          height={1024}
+          className="absolute inset-0 pointer-events-none z-20"
+          style={{ width: '100%', height: '100%' }}
+        />
         <div 
           ref={cursorPreviewRef}
-          className="absolute pointer-events-none border border-white rounded-full bg-white/20 z-30 hidden"
+          className="absolute pointer-events-none border border-white rounded-full bg-white/10 z-30 hidden"
           style={{
             left: '0%',
             top: '0%',
@@ -1088,7 +1214,17 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             height: `${(brushSettings.size / 1024) * 100}%`,
             transform: 'translate(-50%, -50%)',
           }}
-        />
+        >
+          {/* Inner circle for strength feedback - Opacity represents strength */}
+          <div 
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white transition-opacity duration-75"
+            style={{
+              width: '100%',
+              height: '100%',
+              opacity: brushSettings.strength * 0.8
+            }}
+          />
+        </div>
         {showReference && (
           bgImageUrl ? (
             <img 
@@ -1098,16 +1234,19 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
               style={{ opacity: referenceOpacity }}
             />
           ) : (
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none select-none z-10">
-              <div className="bg-black/70 text-slate-300 px-4 py-2 rounded-lg backdrop-blur-sm border border-slate-700 text-sm flex items-center gap-2">
-                <span>⚠️ 请先上传参考图</span>
-              </div>
-            </div>
+            <div
+              className="absolute inset-0 pointer-events-none select-none z-10"
+              style={{
+                opacity: referenceOpacity,
+                backgroundColor: 'rgba(0,0,0,0.25)',
+                backgroundImage:
+                  'linear-gradient(45deg, rgba(255,255,255,0.12) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.12) 75%, rgba(255,255,255,0.12)), linear-gradient(45deg, rgba(255,255,255,0.12) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.12) 75%, rgba(255,255,255,0.12))',
+                backgroundSize: '24px 24px',
+                backgroundPosition: '0 0, 12px 12px',
+              }}
+            />
           )
         )}
-      </div>
-      <div className="absolute top-2 left-2 bg-black/60 text-xs px-2 py-1 rounded pointer-events-none text-white/70 z-20">
-        Tool: {activeTool.toUpperCase().replace('_', ' ')} | Zoom: {Math.round(transform.scale * 100)}%
       </div>
     </div>
   );

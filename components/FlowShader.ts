@@ -18,13 +18,14 @@ export const FlowShaderMaterial = {
     // Cursor uniforms
     uCursor: { value: new THREE.Vector2(0, 0) },
     uBrushSize: { value: 0.02 },
+    uBrushStrength: { value: 0.5 },
     uShowCursor: { value: 0.0 }, // 0.0 = false, 1.0 = true
     // Projection: 0.0 = Equirectangular, 1.0 = Polar
     uProjectionType: { value: 0.0 },
     // Polar Coverage Angle in Radians (PI/2 for Hemisphere, PI for Full Sphere)
     uPolarAngle: { value: Math.PI / 2 },
     uShowFlowMap: { value: 0.0 }, // 0.0 = false, 1.0 = true
-    uFlowMapOpacity: { value: 0.6 },
+    uFlowMapOpacity: { value: 0.2 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -43,6 +44,7 @@ export const FlowShaderMaterial = {
     // Cursor
     uniform vec2 uCursor;
     uniform float uBrushSize;
+    uniform float uBrushStrength;
     uniform float uShowCursor;
     uniform float uProjectionType;
     uniform float uPolarAngle;
@@ -130,13 +132,14 @@ export const FlowShaderMaterial = {
         float ringWidth = 0.0005; // Even thinner stroke
         float ringAlpha = smoothstep(ringWidth + 0.0005, ringWidth, abs(dist - uBrushSize));
         
-        // Semi-transparent fill
-        float fillAlpha = dist < uBrushSize ? 0.05 : 0.0; // Very subtle fill
+        // Inner strength feedback - Opacity represents strength
+         float innerAlpha = smoothstep(0.001, 0.0, dist - uBrushSize);
+         float innerOpacity = uBrushStrength * 0.5; // Scale down for subtle look
 
-        // Mix White Ring and Fill
+        // Mix White Ring and Strength Fill
         vec3 cursorColor = vec3(1.0);
         finalColor.rgb = mix(finalColor.rgb, cursorColor, ringAlpha);
-        finalColor.rgb = mix(finalColor.rgb, cursorColor, fillAlpha);
+        finalColor.rgb = mix(finalColor.rgb, cursorColor, innerAlpha * innerOpacity);
       }
       
       gl_FragColor = finalColor;
@@ -255,16 +258,17 @@ export const ArrowShaderMaterial = {
       float dShaft = max(abs(rotatedUV.y) - thickness, abs(rotatedUV.x) - len);
       
       // Head
+      float headSz = len / 8.0;
       vec2 tip = vec2(len, 0.0);
       vec2 p = rotatedUV;
       
-      vec2 wingEnd = vec2(len - 0.15, 0.15);
+      vec2 wingEnd = vec2(len - headSz, headSz);
       vec2 v = wingEnd - tip;
       vec2 w = p - tip;
       float h = clamp(dot(w, v) / dot(v, v), 0.0, 1.0);
       float dWing1 = length(w - v * h) - thickness;
       
-      vec2 wingEnd2 = vec2(len - 0.15, -0.15);
+      vec2 wingEnd2 = vec2(len - headSz, -headSz);
       vec2 v2 = wingEnd2 - tip;
       float h2 = clamp(dot(w, v2) / dot(v2, v2), 0.0, 1.0);
       float dWing2 = length(w - v2 * h2) - thickness;
