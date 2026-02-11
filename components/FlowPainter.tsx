@@ -71,6 +71,9 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   const redOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const flowMapRef = useRef<HTMLCanvasElement | null>(null);
   const brushTipCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const disturbanceHelperRef = useRef<HTMLCanvasElement | null>(null);
+  const obstacleHelperRef = useRef<HTMLCanvasElement | null>(null);
+  const combinedObstacleHelperRef = useRef<HTMLCanvasElement | null>(null);
 
   const renderPendingRef = useRef(false);
 
@@ -279,12 +282,182 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     // 2. Iterate and Draw Layers
     const layersMap = layerCanvasesRef.current;
     
+    // Helper to apply flow disturbance around obstacles
+    const applyDisturbance = (targetCtx: CanvasRenderingContext2D, obsCanvas: HTMLCanvasElement, distFactor: number, layerBlur: number) => {
+        const w = 1024;
+        const h = 1024;
+        
+        // 1. Create Gradient Map (Blurred Obstacle)
+        let mapCanvas = disturbanceHelperRef.current;
+        if (!mapCanvas) {
+             mapCanvas = document.createElement('canvas');
+             mapCanvas.width = w;
+             mapCanvas.height = h;
+             disturbanceHelperRef.current = mapCanvas;
+        }
+        const mapCtx = mapCanvas.getContext('2d');
+        if (!mapCtx) return;
+        mapCtx.clearRect(0, 0, w, h);
+
+        // Disturbance Distance (Slider) controls Blur Radius
+        // Range: 20px (min) to 300px (max)
+        // This decouples the disturbance field from the obstacle's visual sharpness.
+        // Users can now drag the slider to extend the influence field far beyond the obstacle.
+        const blurRadius = 20 + distFactor * 280; 
+        
+        mapCtx.filter = `blur(${blurRadius}px)`;
+        mapCtx.drawImage(obsCanvas, 0, 0);
+        mapCtx.filter = 'none';
+
+        const mapData = mapCtx.getImageData(0, 0, w, h);
+        const targetData = targetCtx.getImageData(0, 0, w, h);
+        const d = targetData.data;
+        const m = mapData.data;
+
+        // 2. Process Pixels
+        for (let i = 0; i < w * h * 4; i += 4) {
+            const alpha = m[i + 3];
+            if (alpha < 2) continue; // Optimization: Skip almost zero alpha
+            
+            // Current Flow
+            const curR = d[i];
+            const curG = d[i + 1];
+            
+            // Normalize to -1..1 (Red is inverted)
+            const vx = (128 - curR) / 128;
+            const vy = (curG - 128) / 128;
+            
+            const currentSpeed = Math.hypot(vx, vy);
+            if (currentSpeed < 0.01) continue; 
+
+            // Calculate Gradient
+            const idx = i / 4;
+            const x = idx % w;
+            const y = Math.floor(idx / w);
+            
+            // Use a large sample step to get smooth gradients from the large blur
+            const sampleStep = Math.max(5, Math.floor(blurRadius * 0.2));
+            
+            const getAlpha = (tx: number, ty: number) => {
+                const cx = tx < 0 ? 0 : (tx >= w ? w - 1 : tx);
+                const cy = ty < 0 ? 0 : (ty >= h ? h - 1 : ty);
+                return m[(cy * w + cx) * 4 + 3];
+            };
+            
+            const gx = getAlpha(x + sampleStep, y) - getAlpha(x - sampleStep, y);
+            const gy = getAlpha(x, y + sampleStep) - getAlpha(x, y - sampleStep);
+            
+            const gl = Math.hypot(gx, gy);
+            if (gl < 0.1) continue; 
+
+            // Normal (pointing INTO obstacle)
+            const nx = gx / gl;
+            const ny = gy / gl;
+
+            // Tangent Strategy: Align with surface
+            const t1x = -ny;
+            const t1y = nx;
+            
+            // Calculate alignment with tangent
+            const tangentDot = vx * t1x + vy * t1y;
+            
+            // Slip Vector: Physically correct "sliding" motion
+            // V_slip = V - (V . N) * N
+            // This naturally goes to zero at the stagnation point (head-on collision),
+            // providing a smooth transition where flow splits.
+            const slipVx = vx - (vx * nx + vy * ny) * nx;
+            const slipVy = vy - (vx * nx + vy * ny) * ny;
+            
+            // Forced Tangent Vector: Artistic "Energy Preserving" motion
+            // Forces the flow to keep moving at full speed around the object.
+            // This is what creates the "hard" turn but looks "active".
+            const tx = tangentDot >= 0 ? t1x : -t1x;
+            const ty = tangentDot >= 0 ? t1y : -t1y;
+            const forcedVx = tx * currentSpeed;
+            const forcedVy = ty * currentSpeed;
+            
+            // Blending Strategy:
+            // When flow is head-on (tangentDot is near 0), we are at the "Split Point".
+            // Here we should prefer the Slip Vector (which slows down) to avoid abrupt direction flips.
+            // When flow is glancing (tangentDot is high), we prefer Forced Tangent to keep energy.
+            
+            const alignment = Math.abs(tangentDot) / currentSpeed;
+            
+            // Quadratic ease-in for softer split at the nose.
+            // When alignment is near 0 (Head On), splitFactor is very small -> Prefer Slip (Natural Slowdown).
+            // When alignment is near 1 (Side), splitFactor is 1 -> Prefer Forced Tangent (Full Speed).
+            let splitFactor = alignment * alignment;
+
+            const targetVx = slipVx + (forcedVx - slipVx) * splitFactor;
+            const targetVy = slipVy + (forcedVy - slipVy) * splitFactor;
+
+            // Influence Calculation
+            // We want a strong effect that extends far out.
+            const normalizedAlpha = alpha / 255;
+            
+            // Boost influence for low-alpha regions (edges)
+            // Even faint traces of the disturbance field should trigger significant deflection.
+            // Gain of 5.0 means max influence is reached at ~20% alpha.
+            let influence = Math.min(1.0, normalizedAlpha * 5.0);
+            
+            // Smoothstep for natural falloff
+            influence = influence * influence * (3 - 2 * influence);
+            
+            // Impact Factor for dynamic adjustment
+            // (vx * nx + vy * ny) is > 0 when flowing INTO obstacle
+            const impact = (vx * nx + vy * ny) / currentSpeed;
+            
+            // Dynamic Blend Weight
+            // If flowing INTO obstacle (impact > 0), blend STRONGLY to tangent to divert.
+            // If flowing ALONG/AWAY, relax slightly to allow natural flow.
+            let blend = 0;
+            if (impact > 0) {
+                 // Head-on: Force deflection.
+                 // Even at distance, if we are aiming at the rock, start turning.
+                 blend = influence * (1.0 + impact * 0.5); 
+            } else {
+                 // Glancing/Away: Maintain tangent alignment but less aggressively.
+                 blend = influence * 0.8;
+            }
+            
+            blend = Math.min(1.0, blend);
+
+            // Interpolate
+            
+            let finalVx = vx + (targetVx - vx) * blend;
+            let finalVy = vy + (targetVy - vy) * blend;
+            
+            // Normalize Speed
+            const newSpeed = Math.hypot(finalVx, finalVy);
+            if (newSpeed > 0.001) {
+                // Adaptive Speed Restoration
+                // If we are at the nose (splitFactor ~ 0), we allow the speed to drop (natural stagnation).
+                // If we are at the sides (splitFactor ~ 1), we force the speed back to original (energy conservation).
+                // This prevents the "skating" artifact where arrows suddenly speed up while turning at the nose.
+                
+                const finalSpeed = newSpeed + (currentSpeed - newSpeed) * splitFactor;
+                
+                finalVx = (finalVx / newSpeed) * finalSpeed;
+                finalVy = (finalVy / newSpeed) * finalSpeed;
+            }
+
+            d[i] = Math.min(255, Math.max(0, 128 - finalVx * 128));
+            d[i + 1] = Math.min(255, Math.max(0, 128 + finalVy * 128));
+        }
+        
+        targetCtx.putImageData(targetData, 0, 0);
+    };
+
     // We'll use a temp canvas to handle obstacle compositing (source-in) if needed
     // DO NOT use seamlessHelperRef here, as drawBlurred uses it internally.
     // Create a fresh dedicated canvas for Obstacle masking.
-    let obstacleHelper = document.createElement('canvas');
-    obstacleHelper.width = 1024;
-    obstacleHelper.height = 1024;
+    let obstacleHelper = obstacleHelperRef.current;
+    if (!obstacleHelper) {
+         obstacleHelper = document.createElement('canvas');
+         obstacleHelper.width = 1024;
+         obstacleHelper.height = 1024;
+         obstacleHelperRef.current = obstacleHelper;
+    }
     const obsHelperCtx = obstacleHelper.getContext('2d');
 
     // We need to collect effective obstacle canvas for the mask overlay
@@ -294,11 +467,16 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     let combinedObstacleCtx: CanvasRenderingContext2D | null = null;
 
     if (showMaskOverlay) {
+        combinedObstacle = combinedObstacleHelperRef.current;
         if (!combinedObstacle) {
             combinedObstacle = document.createElement('canvas');
             combinedObstacle.width = 1024;
             combinedObstacle.height = 1024;
-            combinedObstacleCtx = combinedObstacle.getContext('2d');
+            combinedObstacleHelperRef.current = combinedObstacle;
+        }
+        combinedObstacleCtx = combinedObstacle.getContext('2d');
+        if (combinedObstacleCtx) {
+             combinedObstacleCtx.clearRect(0, 0, 1024, 1024);
         }
     }
 
@@ -332,6 +510,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             obsHelperCtx.fillStyle = 'rgb(128, 128, 0)';
             obsHelperCtx.fillRect(0, 0, 1024, 1024);
             obsHelperCtx.globalCompositeOperation = 'source-over'; // Reset
+
+            // Apply Disturbance to existing flow
+            if (layer.disturbanceEnabled) {
+                 applyDisturbance(flowCtx, obstacleHelper, layer.disturbance ?? 0, layer.blur);
+            }
 
             // 4. Draw result to Flow Map
             flowCtx.save();

@@ -14,13 +14,17 @@ export interface Layer {
     name: string;
     visible: boolean;
     isObstacle: boolean;
+    disturbance?: number; // 0 to 1, creates flow deviation around obstacle
+    disturbanceEnabled?: boolean; // Controls whether disturbance is active
     blur: number; // 0 to 32
     opacity: number; // 0 to 1
 }
 
 export interface LayerSettings {
-    blur: number; // 0 to 32
-    opacity: number; // 0 to 1 (Optional, mainly for mixing)
+    blur: number;
+    opacity: number;
+    disturbance?: number;
+    disturbanceEnabled?: boolean;
     visible: boolean;
 }
 

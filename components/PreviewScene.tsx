@@ -349,6 +349,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
                 args={[20, 20 / planeAspect]}
                 position={[0, -5, 0]}
                 rotation={[-Math.PI / 2, 0, 0]}
+                scale={[1, -1, 1]}
                 onPointerDown={handlePointerDown}
                 onPointerMove={handlePointerMove}
                 onPointerUp={handlePointerUp}
@@ -384,6 +385,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
                     args={[20, 20 / planeAspect]} 
                     position={[0, -4.99, 0]} 
                     rotation={[-Math.PI / 2, 0, 0]}
+                    scale={[1, -1, 1]}
                     raycast={() => null}
                 >
                     <shaderMaterial 
@@ -555,12 +557,26 @@ const UEControls = ({
       vector.applyAxisAngle(new THREE.Vector3(0, 1, 0), -movementX * sensitivity);
       
       // Pitch: Rotate around Camera Right
-      const right = new THREE.Vector3().crossVectors(vector, new THREE.Vector3(0, 1, 0)).normalize();
+      // Add a small epsilon to up vector to prevent NaN when vector is parallel to up
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      const right = new THREE.Vector3().crossVectors(vector, worldUp).normalize();
       
-      // Mouse Up (neg Y) -> Look Up -> Rotate vector around Right
-      vector.applyAxisAngle(right, -movementY * sensitivity);
+      if (right.lengthSq() > 0.001) {
+        // Mouse Up (neg Y) -> Look Up -> Rotate vector around Right
+        const originalVector = vector.clone();
+        vector.applyAxisAngle(right, -movementY * sensitivity);
+        
+        // Clamp to avoid singularity (looking straight up or down)
+        // OrbitControls has issues when camera is perfectly parallel to Up vector
+        const angleToUp = vector.angleTo(worldUp);
+        const limit = 0.01;
+        if (angleToUp < limit || angleToUp > Math.PI - limit) {
+          vector.copy(originalVector);
+        }
+      }
       
       target.copy(camera.position).add(vector);
+      controls.update();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -674,7 +690,9 @@ const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
           makeDefault 
           enableZoom={true} 
           enablePan={false} 
-          rotateSpeed={-0.5} 
+          rotateSpeed={props.projectionType === 'planar' ? 0.5 : -0.5} 
+          minPolarAngle={0.01}
+          maxPolarAngle={Math.PI - 0.01}
           enabled={true} 
           mouseButtons={{
             LEFT: undefined as unknown as THREE.MOUSE,

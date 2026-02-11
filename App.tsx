@@ -26,7 +26,8 @@
     GripVertical,
     Play,
     Move,
-    HelpCircle
+    HelpCircle,
+    Waves
   } from 'lucide-react';
   import FlowPainter from './components/FlowPainter';
   import PreviewScene from './components/PreviewScene';
@@ -104,16 +105,27 @@
                   </div>
 
                   <div className="flex items-center gap-1">
-                      <button
-                      onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { isObstacle: !layer.isObstacle }); }}
-                      className={`p-1.5 rounded-md transition-colors ${layer.isObstacle ? 'bg-rose-500/20 text-rose-400' : 'text-slate-600 hover:text-slate-400 hover:bg-[#2d2d33]'}`}
-                      title={layer.isObstacle ? "障碍物图层 (点击切换)" : "设为障碍物 (点击切换)"}
-                      >
-                          {layer.isObstacle ? <Shield className="w-3.5 h-3.5" /> : <ShieldOff className="w-3.5 h-3.5" />}
-                      </button>
+                        <button
+                        onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { isObstacle: !layer.isObstacle }); }}
+                        className={`p-1.5 rounded-md transition-colors ${layer.isObstacle ? 'bg-rose-500/20 text-rose-400' : 'text-slate-600 hover:text-slate-400 hover:bg-[#2d2d33]'}`}
+                        title={layer.isObstacle ? "障碍物图层 (点击切换)" : "设为障碍物 (点击切换)"}
+                        >
+                            {layer.isObstacle ? <Shield className="w-3.5 h-3.5" /> : <ShieldOff className="w-3.5 h-3.5" />}
+                        </button>
 
-                      <button
-                      onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { visible: !layer.visible }); }}
+                        {/* Disturbance Toggle (Only for Obstacles) */}
+                        {layer.isObstacle && (
+                            <button
+                                onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { disturbanceEnabled: !layer.disturbanceEnabled }); }}
+                                className={`p-1.5 rounded-md transition-colors ${layer.disturbanceEnabled ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-600 hover:text-slate-400 hover:bg-[#2d2d33]'}`}
+                                title={layer.disturbanceEnabled ? "禁用扰动" : "启用扰动"}
+                            >
+                                <Waves className="w-3.5 h-3.5" />
+                            </button>
+                        )}
+
+                        <button
+                        onClick={(e) => { e.stopPropagation(); updateLayer(layer.id, { visible: !layer.visible }); }}
                       className={`p-1.5 rounded-md transition-colors ${layer.visible ? 'text-slate-300 hover:text-white' : 'text-slate-600 hover:text-slate-400'}`}
                       title={layer.visible ? "隐藏图层" : "显示图层"}
                       >
@@ -122,8 +134,8 @@
                   </div>
               </div>
               
-              {/* Layer Settings (Blur & Opacity) */}
-              <div className={`space-y-2 overflow-hidden transition-all duration-200 ${activeLayerId === layer.id ? 'mt-3 max-h-20 opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
+              {/* Layer Settings (Blur & Opacity & Disturbance) */}
+              <div className={`space-y-2 overflow-hidden transition-all duration-200 ${activeLayerId === layer.id ? 'mt-3 max-h-32 opacity-100' : 'mt-0 max-h-0 opacity-0'}`}>
               <div className="h-px bg-[#2d2d33] w-full"></div>
               
               {/* Blur Slider */}
@@ -151,6 +163,21 @@
                   />
                   <span className="text-[10px] font-mono text-indigo-400 w-6 text-right">{Math.round((layer.opacity ?? 1) * 100)}%</span>
               </div>
+
+              {/* Disturbance Settings (Only for Obstacles) */}
+                {layer.isObstacle && layer.disturbanceEnabled && (
+                    <div className="flex items-center gap-3">
+                        <span className="text-[10px] text-rose-400/70 font-bold uppercase w-8">强度</span>
+                        <input 
+                            type="range" min="0" max="1" step="0.05"
+                            value={layer.disturbance ?? 0}
+                            onChange={(e) => updateLayer(layer.id, { disturbance: Number(e.target.value) })}
+                            className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-rose-500"
+                            onPointerDown={(e) => e.stopPropagation()}
+                        />
+                        <span className="text-[10px] font-mono text-rose-400 w-6 text-right">{Math.round((layer.disturbance ?? 0) * 100)}%</span>
+                    </div>
+                )}
               </div>
           </div>
       );
@@ -338,6 +365,8 @@
             name: `Layer ${layers.length + 1}`,
             visible: true,
             isObstacle: false,
+            disturbance: 0.5,
+            disturbanceEnabled: false,
             blur: 0,
             opacity: 1
         };
