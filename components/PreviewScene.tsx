@@ -461,6 +461,8 @@ const UEControls = ({
             hasResizedBrush.current = false;
             fKeyAccumulatedMovement.current = 0;
             ignoreNextMove.current = true;
+            // Lock pointer to prevent cursor movement during potential resize
+            gl.domElement.requestPointerLock();
         }
         return;
       }
@@ -472,6 +474,7 @@ const UEControls = ({
       const key = e.key.toLowerCase();
       if (key === 'f') {
         isFKeyPressed.current = false;
+        document.exitPointerLock();
         
         // Only trigger reset if we didn't resize the brush (and exceeded threshold)
         // Reset Logic: If F key was pressed and released without significant mouse movement
