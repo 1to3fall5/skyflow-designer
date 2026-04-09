@@ -82,11 +82,15 @@ export const FlowShaderMaterial = {
       // Calculate actual sampling coordinate based on projection
       vec2 baseUV = getSamplingUV(vUv);
       
-      // Sample flow map (vectors stored in R and G channels)
-      // Neutral is 0.5 (128/255). 
-      // Map [0, 1] back to [-1, 1] direction.
+      // Sample flow map (R=flow X, G=flow Y, B=mobility mask)
+      // R/G: Neutral is 0.5 (128/255), maps [0,1] → [-1,1] direction
+      // B: 1.0 = fully mobile (flows), 0.0 = obstacle (static)
       vec4 flowColor = texture2D(uFlowMap, baseUV);
       vec2 flowDir = (flowColor.rg - 0.5) * 2.0;
+      float mobility = flowColor.b; // B channel: obstacle mask
+
+      // Scale flow by mobility (obstacles don't flow)
+      flowDir *= mobility;
 
       // Make the flow loop seamlessly using two phases
       float progress1 = fract(uTime * uSpeed);

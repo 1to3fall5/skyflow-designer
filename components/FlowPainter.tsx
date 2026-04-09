@@ -71,11 +71,26 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   const redOverlayRef = useRef<HTMLCanvasElement | null>(null);
   const flowMapRef = useRef<HTMLCanvasElement | null>(null);
   const brushTipCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastBrushTipKey = useRef<string>('');
   const disturbanceHelperRef = useRef<HTMLCanvasElement | null>(null);
   const obstacleHelperRef = useRef<HTMLCanvasElement | null>(null);
   const combinedObstacleHelperRef = useRef<HTMLCanvasElement | null>(null);
 
   const renderPendingRef = useRef(false);
+
+  // Cached 2D contexts to avoid repeated getContext() calls
+  const ctxCacheRef = useRef<Map<HTMLCanvasElement, CanvasRenderingContext2D>>(new Map());
+  const getCachedCtx = (canvas: HTMLCanvasElement, options?: CanvasRenderingContext2DSettings): CanvasRenderingContext2D | null => {
+      let ctx = ctxCacheRef.current.get(canvas);
+      if (!ctx) {
+          ctx = canvas.getContext('2d', options) ?? undefined;
+          if (ctx) ctxCacheRef.current.set(canvas, ctx);
+      }
+      return ctx ?? null;
+  };
+
+  // Blue channel helper canvas (reused across frames)
+  const blueChannelHelperRef = useRef<HTMLCanvasElement | null>(null);
 
   // History Management
   // Store a Map of layerID -> ImageData
@@ -108,60 +123,66 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     const width = flowMapRef.current.width;
     const height = flowMapRef.current.height;
     
-    // Create temp context to read data if needed, or just use flowMapRef
     const flowCtx = flowMapRef.current.getContext('2d');
     if (!flowCtx) return;
 
-    // Get image data - this might be expensive so we do it sparingly
     const imageData = flowCtx.getImageData(0, 0, width, height);
     const data = imageData.data;
 
-    const step = Math.max(16, 128 - arrowDensity); // Density 16-128 -> Step large-small
+    const step = Math.max(16, 128 - arrowDensity);
     
-    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
-    ctx.lineWidth = 1;
+    // Batch all arrows into two paths to minimize state changes
+    const shaftPath = new Path2D();
+    const headPath = new Path2D();
 
     for (let y = step / 2; y < height; y += step) {
         for (let x = step / 2; x < width; x += step) {
             const i = (Math.floor(y) * width + Math.floor(x)) * 4;
-            const r = data[i];     // X flow: 0(left) - 255(right) ? Check shader logic
-            const g = data[i + 1]; // Y flow
+            const r = data[i];
+            const g = data[i + 1];
             
-            // Decode flow: 128 is 0. <128 is negative, >128 is positive.
-            // In shader/paint logic: 
-            // r = 128 - vx * range  => vx = (128 - r) / range
-            // g = 128 + vy * range  => vy = (g - 128) / range
-            
-            const vx = (128 - r) / 127.0; 
-            const vy = (g - 128) / 127.0;
-
-            const rawLen = Math.sqrt(vx*vx + vy*vy);
             if (r === 128 && g === 128) continue;
 
-            const angle = Math.atan2(vy, vx); // Keep UV angle for drawing on 2D map
+            const vx = (128 - r) / 127.0; 
+            const vy = (g - 128) / 127.0;
+            const rawLen = Math.sqrt(vx*vx + vy*vy);
+
+            const angle = Math.atan2(vy, vx);
             const arrowLen = Math.min(step * 0.8, rawLen * step * 2.0);
+            const cos = Math.cos(angle);
+            const sin = Math.sin(angle);
 
-            ctx.save();
-            ctx.translate(x, y);
-            ctx.rotate(angle);
+            // Transform points manually instead of ctx.save/translate/rotate
+            const halfLen = arrowLen / 2;
+            // Shaft: from (-halfLen, 0) to (halfLen, 0) rotated
+            const x1 = x + (-halfLen) * cos;
+            const y1 = y + (-halfLen) * sin;
+            const x2 = x + halfLen * cos;
+            const y2 = y + halfLen * sin;
             
-            // Draw Arrow
-            ctx.beginPath();
-            ctx.moveTo(-arrowLen/2, 0);
-            ctx.lineTo(arrowLen/2, 0);
-            ctx.stroke();
+            shaftPath.moveTo(x1, y1);
+            shaftPath.lineTo(x2, y2);
 
-            // Arrow head
-            ctx.beginPath();
-            ctx.moveTo(arrowLen/2, 0);
-            ctx.lineTo(arrowLen/2 - 4, -3);
-            ctx.lineTo(arrowLen/2 - 4, 3);
-            ctx.fill();
-
-            ctx.restore();
+            // Arrow head triangle
+            const hx1 = x + halfLen * cos;
+            const hy1 = y + halfLen * sin;
+            const hx2 = x + (halfLen - 4) * cos - (-3) * sin;
+            const hy2 = y + (halfLen - 4) * sin + (-3) * cos;
+            const hx3 = x + (halfLen - 4) * cos - 3 * sin;
+            const hy3 = y + (halfLen - 4) * sin + 3 * cos;
+            
+            headPath.moveTo(hx1, hy1);
+            headPath.lineTo(hx2, hy2);
+            headPath.lineTo(hx3, hy3);
+            headPath.closePath();
         }
     }
+
+    ctx.strokeStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.fillStyle = 'rgba(251, 191, 36, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.stroke(shaftPath);
+    ctx.fill(headPath);
   }, [showArrows, arrowDensity]);
 
   useEffect(() => {
@@ -253,7 +274,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         // Let's just make sure we fill it with neutral first.
         const gCtx = layerGlobalRef.current.getContext('2d');
         if (gCtx) {
-            gCtx.fillStyle = 'rgb(128, 128, 0)';
+            gCtx.fillStyle = 'rgb(128, 128, 255)';
             gCtx.fillRect(0, 0, 1024, 1024);
         }
     }
@@ -267,7 +288,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         flowMapRef.current.width = 1024;
         flowMapRef.current.height = 1024;
     }
-    const flowCtx = flowMapRef.current.getContext('2d', { alpha: false });
+    const flowCtx = flowMapRef.current.getContext('2d', { alpha: false, willReadFrequently: true });
     if (!flowCtx) return;
 
     // 1. Draw Global Layer to Flow Map (Base)
@@ -275,9 +296,12 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         // No blur for global layer as requested
         flowCtx.drawImage(layerGlobalRef.current, 0, 0);
     } else {
-        flowCtx.fillStyle = 'rgb(128, 128, 0)';
+        flowCtx.fillStyle = 'rgb(128, 128, 255)';
         flowCtx.fillRect(0, 0, 1024, 1024);
     }
+
+    // Check if any obstacle layers exist (to decide if B channel ops are needed)
+    const hasObstacleLayers = layers.some(l => l.visible && l.isObstacle);
 
     // 2. Iterate and Draw Layers
     const layersMap = layerCanvasesRef.current;
@@ -460,13 +484,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     }
     const obsHelperCtx = obstacleHelper.getContext('2d');
 
-    // We need to collect effective obstacle canvas for the mask overlay
-    // If multiple layers are obstacles, we might need to composite them for the red overlay
-    // For simplicity, we'll create a temp canvas for the combined obstacle mask if needed
+    // We need combinedObstacle for B-channel writing AND for the red mask overlay
     let combinedObstacle: HTMLCanvasElement | null = null;
     let combinedObstacleCtx: CanvasRenderingContext2D | null = null;
 
-    if (showMaskOverlay) {
+    if (hasObstacleLayers || showMaskOverlay) {
         combinedObstacle = combinedObstacleHelperRef.current;
         if (!combinedObstacle) {
             combinedObstacle = document.createElement('canvas');
@@ -505,9 +527,9 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                 obsHelperCtx.drawImage(layerCanvas, 0, 0);
             }
             
-            // 3. Composite "Source-In" with Obstacle Color
+            // 3. Composite "Source-In" with Obstacle Color (neutral flow + B=255)
             obsHelperCtx.globalCompositeOperation = 'source-in';
-            obsHelperCtx.fillStyle = 'rgb(128, 128, 0)';
+            obsHelperCtx.fillStyle = 'rgb(128, 128, 255)';
             obsHelperCtx.fillRect(0, 0, 1024, 1024);
             obsHelperCtx.globalCompositeOperation = 'source-over'; // Reset
 
@@ -516,13 +538,27 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                  applyDisturbance(flowCtx, obstacleHelper, layer.disturbance ?? 0, layer.blur);
             }
 
-            // 4. Draw result to Flow Map
+            // 4. Draw result to Flow Map (R/G channels)
             flowCtx.save();
             flowCtx.globalAlpha = currentOpacity;
             flowCtx.drawImage(obstacleHelper, 0, 0);
             flowCtx.restore();
 
-            // 5. Add to Combined Obstacle Mask (for Red Overlay)
+            // 5. Add to Combined Obstacle Mask (for Red Overlay AND B-channel)
+            // We always collect obstacle shapes into combinedObstacle for B-channel writing
+            if (!combinedObstacle) {
+                combinedObstacle = combinedObstacleHelperRef.current;
+                if (!combinedObstacle) {
+                    combinedObstacle = document.createElement('canvas');
+                    combinedObstacle.width = 1024;
+                    combinedObstacle.height = 1024;
+                    combinedObstacleHelperRef.current = combinedObstacle;
+                }
+                combinedObstacleCtx = combinedObstacle.getContext('2d');
+                if (combinedObstacleCtx) {
+                    combinedObstacleCtx.clearRect(0, 0, 1024, 1024);
+                }
+            }
             if (combinedObstacleCtx) {
                  combinedObstacleCtx.save();
                  combinedObstacleCtx.globalAlpha = currentOpacity;
@@ -542,6 +578,25 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             flowCtx.restore();
         }
     });
+
+    // Post-processing: Write B channel (obstacle mask) in a single pass
+    // B = 255 (mobile/white) for normal areas, B = 0 (immobile/black) for obstacles
+    // When no obstacles exist, all sources already write B=255, so no extra work needed
+    if (hasObstacleLayers && combinedObstacle && combinedObstacleCtx) {
+        const obsData = combinedObstacleCtx.getImageData(0, 0, 1024, 1024);
+        const fData = flowCtx.getImageData(0, 0, 1024, 1024);
+        const od = obsData.data;
+        const fd = fData.data;
+        for (let i = 0; i < od.length; i += 4) {
+            const obsAlpha = od[i + 3];
+            if (obsAlpha > 0) {
+                // Obstacle areas: B blends toward 0 (immobile)
+                fd[i + 2] = Math.round(255 * (1 - obsAlpha / 255));
+            }
+            // Non-obstacle areas keep their B=255 from source layers
+        }
+        flowCtx.putImageData(fData, 0, 0);
+    }
 
     // Update the 3D Texture
     onTextureUpdate(flowMapRef.current);
@@ -848,7 +903,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     
     const fillR = 128;
     const fillG = 128;
-    const fillB = 0;
+    const fillB = 255;
     const fillA = 255;
 
     while (stack.length > 0) {
@@ -916,7 +971,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     tool: ActiveTool,
     isObstacleLayer: boolean
   ) => {
-    const ctx = targetCanvas.getContext('2d');
+    const ctx = getCachedCtx(targetCanvas);
     if (!ctx) return;
 
     const dist = Math.hypot(x - lx, y - ly);
@@ -941,31 +996,36 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
     const radius = settings.size / 2;
     const tipSize = Math.ceil(settings.size);
+    const tipKey = `${tipSize}_${r}_${g}_${settings.hardness}_${compositeOp}`;
+    
     if (!brushTipCanvasRef.current) {
         brushTipCanvasRef.current = document.createElement('canvas');
     }
     const tipCanvas = brushTipCanvasRef.current;
-    if (tipCanvas.width !== tipSize || tipCanvas.height !== tipSize) {
+    
+    if (tipCanvas.width !== tipSize || tipCanvas.height !== tipSize || lastBrushTipKey.current !== tipKey) {
         tipCanvas.width = tipSize;
         tipCanvas.height = tipSize;
-    }
-    const tCtx = tipCanvas.getContext('2d');
-    if (tCtx) {
-        tCtx.clearRect(0, 0, tipSize, tipSize);
-        const center = tipSize / 2;
-        const innerRadius = radius * Math.max(0, Math.min(0.99, settings.hardness));
-        const gradient = tCtx.createRadialGradient(center, center, innerRadius, center, center, radius);
+        lastBrushTipKey.current = tipKey;
         
-        if (compositeOp === 'destination-out') {
-            gradient.addColorStop(0, `rgba(0,0,0,1)`);
-            gradient.addColorStop(1, `rgba(0,0,0,0)`);
-        } else {
-            gradient.addColorStop(0, `rgba(${r}, ${g}, 0, 1)`);
-            gradient.addColorStop(1, `rgba(${r}, ${g}, 0, 0)`);
+        const tCtx = tipCanvas.getContext('2d');
+        if (tCtx) {
+            tCtx.clearRect(0, 0, tipSize, tipSize);
+            const center = tipSize / 2;
+            const innerRadius = radius * Math.max(0, Math.min(0.99, settings.hardness));
+            const gradient = tCtx.createRadialGradient(center, center, innerRadius, center, center, radius);
+            
+            if (compositeOp === 'destination-out') {
+                gradient.addColorStop(0, `rgba(0,0,0,1)`);
+                gradient.addColorStop(1, `rgba(0,0,0,0)`);
+            } else {
+                gradient.addColorStop(0, `rgba(${r}, ${g}, 255, 1)`);
+                gradient.addColorStop(1, `rgba(${r}, ${g}, 255, 0)`);
+            }
+            
+            tCtx.fillStyle = gradient;
+            tCtx.fillRect(0, 0, tipSize, tipSize);
         }
-        
-        tCtx.fillStyle = gradient;
-        tCtx.fillRect(0, 0, tipSize, tipSize);
     }
 
     ctx.globalCompositeOperation = compositeOp;
@@ -1093,7 +1153,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         for (let i = 0; i < data.length; i += 4) {
             data[i] = r;
             data[i + 1] = g;
-            data[i + 2] = 0;
+            data[i + 2] = 255;
             data[i + 3] = 255;
         }
     } else {
@@ -1131,7 +1191,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
                 if (!valid) {
                     data[index] = 128;
                     data[index + 1] = 128;
-                    data[index + 2] = 0;
+                    data[index + 2] = 255;
                     data[index + 3] = 255; 
                     continue;
                 }
@@ -1173,7 +1233,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     
                 data[index] = r;
                 data[index + 1] = g;
-                data[index + 2] = 0;
+                data[index + 2] = 255;
                 data[index + 3] = 255;
             }
         }
@@ -1191,7 +1251,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
           if (resetTrigger > 0) {
               if (layerGlobalRef.current) {
                   const ctx = layerGlobalRef.current.getContext('2d');
-                  if (ctx) { ctx.fillStyle = 'rgb(128,128,0)'; ctx.fillRect(0,0,1024,1024); }
+                  if (ctx) { ctx.fillStyle = 'rgb(128,128,255)'; ctx.fillRect(0,0,1024,1024); }
               }
               // Clear all layers
               layerCanvasesRef.current.forEach(canvas => {
