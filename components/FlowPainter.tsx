@@ -2,6 +2,16 @@ import React, { useRef, useEffect, useState, useCallback, useImperativeHandle, f
 import { BrushSettings, ActiveTool, FlowPainterHandle, ProjectionType, Layer, 
          isPaintLayer, isWindLayer, isObstacleLayer, isAdjustmentLayer, EditTarget } from '../types';
 
+// acos is the hottest remaining transcendental when generating wind fields;
+// a 4096-entry LUT is far beyond what 8-bit flow values need.
+const ACOS_LUT_N = 4096;
+const ACOS_LUT = new Float32Array(ACOS_LUT_N + 1);
+for (let i = 0; i <= ACOS_LUT_N; i++) ACOS_LUT[i] = Math.acos((i / ACOS_LUT_N) * 2 - 1);
+const fastAcos = (x: number) => {
+  const t = (x + 1) * 0.5 * ACOS_LUT_N;
+  return ACOS_LUT[t < 0 ? 0 : (t > ACOS_LUT_N ? ACOS_LUT_N : t | 0)];
+};
+
 interface FlowPainterProps {
   brushSettings: BrushSettings;
   activeTool: ActiveTool;
@@ -67,22 +77,45 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
   const renderPendingRef = useRef(false);
 
+  // --- Cascading composite cache ---
+  // renderComposite used to rebuild every layer from scratch on every pointer
+  // move: wind trig over 1M pixels, full-resolution blurs, disturbance passes...
+  // Slot i now caches the composited result of layers 0..i; its key folds in the
+  // previous slot's key so an edit only invalidates that layer and the ones above.
+  const compositeCacheRef = useRef<HTMLCanvasElement[]>([]);
+  const compositeKeyRef = useRef<string[]>([]);
+  const finalCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const finalKeyRef = useRef<string>('');
+  const combinedObstacleRef = useRef<HTMLCanvasElement | null>(null);
+  const combinedObstacleKeyRef = useRef<string>('');
+  // Bumped whenever a layer's pixels change (brush stroke, mask edit, fill, undo)
+  const contentVersionRef = useRef<Map<string, number>>(new Map());
+  const arrowKeyRef = useRef<string>('');
+  const arrowSampleRef = useRef<HTMLCanvasElement | null>(null);
+  const windGenRef = useRef<HTMLCanvasElement | null>(null);
+
   // Context cache
   const ctxCacheRef = useRef<Map<HTMLCanvasElement, CanvasRenderingContext2D>>(new Map());
-  const getCachedCtx = (canvas: HTMLCanvasElement, options?: CanvasRenderingContext2DSettings): CanvasRenderingContext2D | null => {
+  const getCachedCtx = useCallback((canvas: HTMLCanvasElement, options?: CanvasRenderingContext2DSettings): CanvasRenderingContext2D | null => {
       let ctx = ctxCacheRef.current.get(canvas);
       if (!ctx) {
           ctx = canvas.getContext('2d', options) ?? undefined;
           if (ctx) ctxCacheRef.current.set(canvas, ctx);
       }
       return ctx ?? null;
-  };
+  }, []);
+
+  // Marks a layer's pixels (or its mask) as dirty so the composite cache drops it.
+  const bumpContentVersion = useCallback((key: string) => {
+      contentVersionRef.current.set(key, (contentVersionRef.current.get(key) ?? 0) + 1);
+  }, []);
 
   // History
   const historyRef = useRef<Map<string, ImageData>[]>([]);
   const historyIndexRef = useRef<number>(-1);
 
   const SIZE = 1024;
+  const ARROW_SAMPLE = 128;
 
   const initCanvas = (width = SIZE, height = SIZE, fillStyle?: string) => {
       const c = document.createElement('canvas');
@@ -93,24 +126,43 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   };
 
   // --- Arrow Drawing ---
-  const drawArrows = useCallback(() => {
-    if (!arrowCanvasRef.current || !flowMapRef.current) return;
-    const ctx = arrowCanvasRef.current.getContext('2d');
+  const drawArrows = useCallback((flowKey: string) => {
+    if (!arrowCanvasRef.current) return;
+    const ctx = getCachedCtx(arrowCanvasRef.current);
     if (!ctx) return;
+    // Nothing changed since the last composite — skip the whole pass.
+    if (arrowKeyRef.current === flowKey) return;
+    arrowKeyRef.current = flowKey;
     ctx.clearRect(0, 0, SIZE, SIZE);
-    if (!showArrows) return;
-    const flowCtx = flowMapRef.current.getContext('2d');
-    if (!flowCtx) return;
-    const imageData = flowCtx.getImageData(0, 0, SIZE, SIZE);
-    const data = imageData.data;
+
+    const flowCanvas = finalCanvasRef.current;
+    if (!showArrows || !flowCanvas) return;
+
+    // Downsample before reading: 128² instead of 1024² is ~64x less pixel traffic
+    // and the arrow field is far coarser than that anyway.
+    let sample = arrowSampleRef.current;
+    if (!sample) {
+        sample = document.createElement('canvas');
+        sample.width = ARROW_SAMPLE; sample.height = ARROW_SAMPLE;
+        arrowSampleRef.current = sample;
+    }
+    const sCtx = sample.getContext('2d', { willReadFrequently: true });
+    if (!sCtx) return;
+    sCtx.clearRect(0, 0, ARROW_SAMPLE, ARROW_SAMPLE);
+    sCtx.drawImage(flowCanvas, 0, 0, ARROW_SAMPLE, ARROW_SAMPLE);
+    const data = sCtx.getImageData(0, 0, ARROW_SAMPLE, ARROW_SAMPLE).data;
+
+    const scale = SIZE / ARROW_SAMPLE;
     const step = Math.max(16, 128 - arrowDensity);
+    const sStep = step / scale;
     const shaftPath = new Path2D();
     const headPath = new Path2D();
-    for (let y = step / 2; y < SIZE; y += step) {
-        for (let x = step / 2; x < SIZE; x += step) {
-            const i = (Math.floor(y) * SIZE + Math.floor(x)) * 4;
+    for (let sy = sStep / 2; sy < ARROW_SAMPLE; sy += sStep) {
+        for (let sx = sStep / 2; sx < ARROW_SAMPLE; sx += sStep) {
+            const i = (Math.floor(sy) * ARROW_SAMPLE + Math.floor(sx)) * 4;
             const r = data[i], g = data[i + 1];
             if (r === 128 && g === 128) continue;
+            const x = sx * scale, y = sy * scale;
             const vx = (128 - r) / 127.0, vy = (g - 128) / 127.0;
             const rawLen = Math.sqrt(vx*vx + vy*vy);
             const angle = Math.atan2(vy, vx);
@@ -130,9 +182,9 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
     ctx.lineWidth = 1;
     ctx.stroke(shaftPath);
     ctx.fill(headPath);
-  }, [showArrows, arrowDensity]);
+  }, [showArrows, arrowDensity, getCachedCtx]);
 
-  useEffect(() => { drawArrows(); }, [drawArrows]);
+  useEffect(() => { arrowKeyRef.current = ''; drawArrows(finalKeyRef.current); }, [drawArrows]);
 
   // Load Reference Image
   useEffect(() => {
@@ -150,41 +202,42 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
   // Seamless blur helper
   const drawBlurred = useCallback((targetCtx: CanvasRenderingContext2D, sourceCanvas: HTMLCanvasElement, blurAmount: number) => {
       if (blurAmount <= 0) { targetCtx.drawImage(sourceCanvas, 0, 0); return; }
-      const padding = Math.ceil(blurAmount * 4);
-      const totalSize = SIZE + padding * 2;
+      // A full-resolution canvas blur costs radius x pixels, so blur(64) on 1024²
+      // is brutal. Downscale first, blur with a proportionally smaller radius, then
+      // scale back up — visually equivalent for a blur this soft, ~an order of
+      // magnitude cheaper.
+      const ds = Math.max(1, Math.min(4, Math.ceil(blurAmount / 8)));
+      const radius = blurAmount / ds;
+      const low = SIZE / ds;
+      const padding = Math.ceil(radius * 3);
+      const total = low + padding * 2;
       let helper = seamlessHelperRef.current;
-      if (!helper || helper.width !== totalSize || helper.height !== totalSize) {
-           helper = document.createElement('canvas');
-           helper.width = totalSize; helper.height = totalSize;
-           seamlessHelperRef.current = helper;
-      }
+      if (!helper) { helper = document.createElement('canvas'); seamlessHelperRef.current = helper; }
+      if (helper.width !== total || helper.height !== total) { helper.width = total; helper.height = total; }
       const hCtx = helper.getContext('2d');
-      if (hCtx) {
-          hCtx.clearRect(0, 0, totalSize, totalSize);
-          hCtx.drawImage(sourceCanvas, padding, padding);
-          hCtx.drawImage(sourceCanvas, padding - SIZE, padding);
-          hCtx.drawImage(sourceCanvas, padding + SIZE, padding);
-          hCtx.drawImage(sourceCanvas, padding, padding - SIZE);
-          hCtx.drawImage(sourceCanvas, padding, padding + SIZE);
-          hCtx.drawImage(sourceCanvas, padding - SIZE, padding - SIZE);
-          hCtx.drawImage(sourceCanvas, padding + SIZE, padding - SIZE);
-          hCtx.drawImage(sourceCanvas, padding - SIZE, padding + SIZE);
-          hCtx.drawImage(sourceCanvas, padding + SIZE, padding + SIZE);
-          targetCtx.save();
-          targetCtx.filter = `blur(${blurAmount}px)`;
-          targetCtx.drawImage(helper, -padding, -padding);
-          targetCtx.filter = 'none';
-          targetCtx.restore();
+      if (!hCtx) { targetCtx.drawImage(sourceCanvas, 0, 0); return; }
+      hCtx.clearRect(0, 0, total, total);
+      // 3x3 tiling keeps the blur seamless across the equirect wrap
+      for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+              hCtx.drawImage(sourceCanvas, padding + ox * low, padding + oy * low, low, low);
+          }
       }
+      targetCtx.save();
+      targetCtx.filter = `blur(${radius}px)`;
+      targetCtx.drawImage(helper, 0, 0, total, total, -padding * ds, -padding * ds, total * ds, total * ds);
+      targetCtx.filter = 'none';
+      targetCtx.restore();
   }, []);
 
   // --- Wind Layer Generation ---
+  // Generated at half resolution (the field is very smooth) with the per-row /
+  // per-column trig hoisted out of the inner loop, then upscaled.
+  const WIND_RES = 512;
+
   const generateWindData = useCallback((canvas: HTMLCanvasElement, direction: number, strength: number) => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const imageData = ctx.createImageData(SIZE, SIZE);
-    const data = imageData.data;
-    const polarRad = (polarAngle * Math.PI) / 180;
     const windRad = (direction * Math.PI) / 180;
     const Wx = Math.sin(windRad), Wy = 0, Wz = Math.cos(windRad);
     const step = 0.05;
@@ -192,96 +245,137 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
 
     if (projectionType === 'planar') {
         const du = Wx * step, dv = Wz * step;
-        const r = Math.floor(Math.max(0, Math.min(255, 128 + (-du * s * 127))));
-        const g = Math.floor(Math.max(0, Math.min(255, 128 + (-dv * s * 127))));
-        for (let i = 0; i < data.length; i += 4) {
-            data[i] = r; data[i + 1] = g; data[i + 2] = 255; data[i + 3] = 255;
-        }
-    } else {
-        for (let y = 0; y < SIZE; y++) {
-            for (let x = 0; x < SIZE; x++) {
-                const index = (y * SIZE + x) * 4;
-                const u = (x + 0.5) / SIZE;
-                const v = 1.0 - ((y + 0.5) / SIZE);
-                let valid = true;
-                let px = 0, py = 0, pz = 0;
-                if (projectionType === 'polar') {
-                    const uc = u - 0.5, vc = v - 0.5;
-                    const r = Math.sqrt(uc*uc + vc*vc);
-                    if (r > 0.5) { valid = false; }
-                    else {
-                        const theta = Math.atan2(uc, vc);
-                        const phi = (r / 0.5) * polarRad;
-                        px = Math.sin(phi) * Math.sin(theta); py = Math.cos(phi); pz = Math.sin(phi) * Math.cos(theta);
-                    }
-                } else {
-                    const phi = (1 - v) * Math.PI;
-                    const theta = u * 2 * Math.PI;
-                    px = Math.sin(phi) * Math.sin(theta); py = Math.cos(phi); pz = Math.sin(phi) * Math.cos(theta);
+        const r = Math.max(0, Math.min(255, Math.round(128 + (-du * s * 127))));
+        const g = Math.max(0, Math.min(255, Math.round(128 + (-dv * s * 127))));
+        ctx.fillStyle = `rgb(${r},${g},255)`;
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        return;
+    }
+
+    const R = WIND_RES;
+    let gen = windGenRef.current;
+    if (!gen) { gen = document.createElement('canvas'); gen.width = R; gen.height = R; windGenRef.current = gen; }
+    const gCtx = gen.getContext('2d');
+    if (!gCtx) return;
+    const imageData = gCtx.createImageData(R, R);
+    const data = imageData.data;
+    const polarRad = (polarAngle * Math.PI) / 180;
+
+    if (projectionType === 'polar') {
+        for (let y = 0; y < R; y++) {
+            for (let x = 0; x < R; x++) {
+                const index = (y * R + x) * 4;
+                const u = (x + 0.5) / R, v = 1.0 - ((y + 0.5) / R);
+                const uc = u - 0.5, vc = v - 0.5;
+                const rad = Math.sqrt(uc * uc + vc * vc);
+                if (rad > 0.5) {
+                    data[index] = 128; data[index+1] = 128; data[index+2] = 255; data[index+3] = 255;
+                    continue;
                 }
-                if (!valid) { data[index] = 128; data[index+1] = 128; data[index+2] = 255; data[index+3] = 255; continue; }
+                const theta = Math.atan2(uc, vc);
+                const phi = (rad / 0.5) * polarRad;
+                const px = Math.sin(phi) * Math.sin(theta), py = Math.cos(phi), pz = Math.sin(phi) * Math.cos(theta);
                 let nx = px + Wx * step, ny = py + Wy * step, nz = pz + Wz * step;
                 const len = Math.sqrt(nx*nx + ny*ny + nz*nz);
                 nx /= len; ny /= len; nz /= len;
-                let nextU = 0, nextV = 0;
-                if (projectionType === 'polar') {
-                    const clampedY = Math.max(-1, Math.min(1, ny));
-                    const phi = Math.acos(clampedY);
-                    const theta = Math.atan2(nx, nz);
-                    const r = (phi / polarRad) * 0.5;
-                    nextU = 0.5 + r * Math.sin(theta);
-                    nextV = 0.5 + r * Math.cos(theta);
-                } else {
-                    const clampedY = Math.max(-1, Math.min(1, ny));
-                    const phi = Math.acos(clampedY);
-                    const theta = Math.atan2(nx, nz);
-                    nextV = 1.0 - (phi / Math.PI);
-                    let normTheta = theta; if (normTheta < 0) normTheta += 2 * Math.PI;
-                    nextU = normTheta / (2 * Math.PI);
-                }
-                let du = nextU - u, dv = nextV - v;
-                if (projectionType === 'equirectangular') { if (du > 0.5) du -= 1.0; if (du < -0.5) du += 1.0; }
-                const rr = Math.floor(Math.max(0, Math.min(255, 128 + (-du * s * 127))));
-                const gg = Math.floor(Math.max(0, Math.min(255, 128 + (-dv * s * 127))));
-                data[index] = rr; data[index+1] = gg; data[index+2] = 255; data[index+3] = 255;
+                const nTheta = Math.atan2(nx, nz);
+                const nr = (fastAcos(Math.max(-1, Math.min(1, ny))) / polarRad) * 0.5;
+                const du = (0.5 + nr * Math.sin(nTheta)) - u;
+                const dv = (0.5 + nr * Math.cos(nTheta)) - v;
+                data[index]   = Math.max(0, Math.min(255, Math.round(128 + (-du * s * 127))));
+                data[index+1] = Math.max(0, Math.min(255, Math.round(128 + (-dv * s * 127))));
+                data[index+2] = 255; data[index+3] = 255;
+            }
+        }
+    } else {
+        // phi depends only on the row and theta only on the column: 2K trig calls
+        // instead of 2 per pixel.
+        const sinPhi = new Float32Array(R), cosPhi = new Float32Array(R);
+        const vRow = new Float32Array(R);
+        for (let y = 0; y < R; y++) {
+            const phi = ((y + 0.5) / R) * Math.PI;
+            sinPhi[y] = Math.sin(phi); cosPhi[y] = Math.cos(phi);
+            vRow[y] = 1.0 - ((y + 0.5) / R);
+        }
+        const sinTheta = new Float32Array(R), cosTheta = new Float32Array(R);
+        const uCol = new Float32Array(R);
+        for (let x = 0; x < R; x++) {
+            const th = ((x + 0.5) / R) * 2 * Math.PI;
+            sinTheta[x] = Math.sin(th); cosTheta[x] = Math.cos(th);
+            uCol[x] = (x + 0.5) / R;
+        }
+        for (let y = 0; y < R; y++) {
+            const sp = sinPhi[y], cp = cosPhi[y], v = vRow[y];
+            const rowBase = y * R;
+            for (let x = 0; x < R; x++) {
+                const index = (rowBase + x) * 4;
+                const px = sp * sinTheta[x], py = cp, pz = sp * cosTheta[x];
+                let nx = px + Wx * step, ny = py + Wy * step, nz = pz + Wz * step;
+                const len = Math.sqrt(nx*nx + ny*ny + nz*nz);
+                nx /= len; ny /= len; nz /= len;
+                const nextV = 1.0 - (fastAcos(Math.max(-1, Math.min(1, ny))) / Math.PI);
+                let normTheta = Math.atan2(nx, nz);
+                if (normTheta < 0) normTheta += 2 * Math.PI;
+                let du = (normTheta / (2 * Math.PI)) - uCol[x];
+                const dv = nextV - v;
+                if (du > 0.5) du -= 1.0; else if (du < -0.5) du += 1.0;
+                data[index]   = Math.max(0, Math.min(255, Math.round(128 + (-du * s * 127))));
+                data[index+1] = Math.max(0, Math.min(255, Math.round(128 + (-dv * s * 127))));
+                data[index+2] = 255; data[index+3] = 255;
             }
         }
     }
-    ctx.putImageData(imageData, 0, 0);
+    gCtx.putImageData(imageData, 0, 0);
+    ctx.clearRect(0, 0, SIZE, SIZE);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(gen, 0, 0, SIZE, SIZE);
   }, [projectionType, polarAngle]);
 
   // --- Disturbance ---
   const applyDisturbance = useCallback((targetCtx: CanvasRenderingContext2D, obsCanvas: HTMLCanvasElement, distFactor: number) => {
     const w = SIZE, h = SIZE;
+    // blur() up to 300px over a full 1024² buffer is the slowest op in the whole
+    // app. Run it on a half-size map instead and sample that from the loop.
+    const DS = 2;
+    const lw = w / DS, lh = h / DS;
     let mapCanvas = disturbanceHelperRef.current;
-    if (!mapCanvas) { mapCanvas = initCanvas(w, h); disturbanceHelperRef.current = mapCanvas; }
-    const mapCtx = mapCanvas.getContext('2d');
+    if (!mapCanvas) {
+        mapCanvas = document.createElement('canvas');
+        mapCanvas.width = lw; mapCanvas.height = lh;
+        disturbanceHelperRef.current = mapCanvas;
+    }
+    const mapCtx = mapCanvas.getContext('2d', { willReadFrequently: true });
     if (!mapCtx) return;
-    mapCtx.clearRect(0, 0, w, h);
-    const blurRadius = 20 + distFactor * 280;
+    mapCtx.clearRect(0, 0, lw, lh);
+    const blurRadius = (20 + distFactor * 280) / DS;
     mapCtx.filter = `blur(${blurRadius}px)`;
-    mapCtx.drawImage(obsCanvas, 0, 0);
+    mapCtx.drawImage(obsCanvas, 0, 0, lw, lh);
     mapCtx.filter = 'none';
-    const mapData = mapCtx.getImageData(0, 0, w, h);
+    const m = mapCtx.getImageData(0, 0, lw, lh).data;
     const targetData = targetCtx.getImageData(0, 0, w, h);
-    const d = targetData.data, m = mapData.data;
-    const sampleStep = Math.max(5, Math.floor(blurRadius * 0.2));
+    const d = targetData.data;
+    // Same gradient span as the old full-res version, just in low-res pixels.
+    const sampleStep = Math.max(2, Math.floor(blurRadius * 0.2));
     const getAlpha = (tx: number, ty: number) => {
-        const cx = tx < 0 ? 0 : (tx >= w ? w - 1 : tx);
-        const cy = ty < 0 ? 0 : (ty >= h ? h - 1 : ty);
-        return m[(cy * w + cx) * 4 + 3];
+        const cx = tx < 0 ? 0 : (tx >= lw ? lw - 1 : tx);
+        const cy = ty < 0 ? 0 : (ty >= lh ? lh - 1 : ty);
+        return m[(cy * lw + cx) * 4 + 3];
     };
-    for (let i = 0; i < w * h * 4; i += 4) {
-        const alpha = m[i + 3];
+    for (let y = 0; y < h; y++) {
+      const ly = (y / DS) | 0;
+      const rowBase = y * w;
+      for (let x = 0; x < w; x++) {
+        const i = (rowBase + x) * 4;
+        const lx = (x / DS) | 0;
+        const alpha = m[(ly * lw + lx) * 4 + 3];
         if (alpha < 2) continue;
         const curR = d[i], curG = d[i + 1];
         const vx = (128 - curR) / 128, vy = (curG - 128) / 128;
-        const currentSpeed = Math.hypot(vx, vy);
+        const currentSpeed = Math.sqrt(vx * vx + vy * vy);
         if (currentSpeed < 0.01) continue;
-        const idx = i / 4, x = idx % w, y = Math.floor(idx / w);
-        const gx = getAlpha(x + sampleStep, y) - getAlpha(x - sampleStep, y);
-        const gy = getAlpha(x, y + sampleStep) - getAlpha(x, y - sampleStep);
-        const gl = Math.hypot(gx, gy);
+        const gx = getAlpha(lx + sampleStep, ly) - getAlpha(lx - sampleStep, ly);
+        const gy = getAlpha(lx, ly + sampleStep) - getAlpha(lx, ly - sampleStep);
+        const gl = Math.sqrt(gx * gx + gy * gy);
         if (gl < 0.1) continue;
         const nx = gx / gl, ny = gy / gl;
         const t1x = -ny, t1y = nx;
@@ -302,7 +396,7 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         blend = Math.min(1.0, blend);
         let finalVx = vx + (targetVx - vx) * blend;
         let finalVy = vy + (targetVy - vy) * blend;
-        const newSpeed = Math.hypot(finalVx, finalVy);
+        const newSpeed = Math.sqrt(finalVx * finalVx + finalVy * finalVy);
         if (newSpeed > 0.001) {
             const finalSpeed = newSpeed + (currentSpeed - newSpeed) * splitFactor;
             finalVx = (finalVx / newSpeed) * finalSpeed;
@@ -310,150 +404,215 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         }
         d[i] = Math.min(255, Math.max(0, 128 - finalVx * 128));
         d[i + 1] = Math.min(255, Math.max(0, 128 + finalVy * 128));
+      }
     }
     targetCtx.putImageData(targetData, 0, 0);
   }, []);
 
   // --- Main Rendering Pipeline ---
+  const getSlot = (index: number): HTMLCanvasElement => {
+      let c = compositeCacheRef.current[index];
+      if (!c) {
+          c = document.createElement('canvas');
+          c.width = SIZE; c.height = SIZE;
+          compositeCacheRef.current[index] = c;
+      }
+      return c;
+  };
+
+  // Signature of the composited result of layers 0..i. It folds in the previous
+  // slot's key, so editing layer i invalidates i and everything stacked above it
+  // while everything below stays cached.
+  const layerSignature = (layer: Layer, prevKey: string): string => {
+      const ver = contentVersionRef.current.get(layer.id) ?? 0;
+      const maskVer = contentVersionRef.current.get(`mask:${layer.id}`) ?? 0;
+      if (!layer.visible) return `${prevKey}|${layer.id}:off`;
+      const op = layer.opacity.toFixed(3);
+      if (isWindLayer(layer)) return `${prevKey}|${layer.id}:w${layer.direction},${layer.strength},m${maskVer},o${op},b${layer.blur}`;
+      if (isObstacleLayer(layer)) return `${prevKey}|${layer.id}:om${maskVer},d${layer.disturbanceEnabled ? layer.disturbance : -1},o${op},b${layer.blur}`;
+      return `${prevKey}|${layer.id}:p${ver},o${op},b${layer.blur}`;
+  };
+
   const renderCompositeInternal = useCallback(() => {
+    // Cleared up front: an early return below would otherwise leave the
+    // "already scheduled" flag stuck and freeze all further compositing.
+    renderPendingRef.current = false;
     const mainCanvas = canvasRef.current;
     if (!mainCanvas) return;
-    const ctx = mainCanvas.getContext('2d', { alpha: false });
+    const ctx = getCachedCtx(mainCanvas, { alpha: false });
     if (!ctx) return;
-
-    if (!flowMapRef.current) {
-        flowMapRef.current = document.createElement('canvas');
-        flowMapRef.current.width = SIZE; flowMapRef.current.height = SIZE;
-    }
-    const flowCtx = flowMapRef.current.getContext('2d', { alpha: false, willReadFrequently: true });
-    if (!flowCtx) return;
-
-    // Start with neutral (128, 128, 255) = no flow, fully mobile
-    flowCtx.fillStyle = 'rgb(128, 128, 255)';
-    flowCtx.fillRect(0, 0, SIZE, SIZE);
 
     const canvasMap = layerCanvasesRef.current;
     const maskMap = maskCanvasesRef.current;
 
-    // Track if we have any obstacles for B-channel post-processing
-    let hasObstacles = false;
-    let combinedObstacle: HTMLCanvasElement | null = null;
-    let combinedObstacleCtx: CanvasRenderingContext2D | null = null;
+    let prevCanvas: HTMLCanvasElement | null = null;
+    let prevKey = 'base';
 
-    // Process layers from bottom to top (array order)
-    layers.forEach(layer => {
-        if (!layer.visible) return;
-        const opacity = layer.opacity ?? 1;
+    // Process layers bottom to top, reusing cached slots where nothing changed
+    for (let i = 0; i < layers.length; i++) {
+        const layer = layers[i];
+        const sig = layerSignature(layer, prevKey);
+        if (compositeKeyRef.current[i] === sig && compositeCacheRef.current[i]) {
+            prevCanvas = compositeCacheRef.current[i];
+            prevKey = sig;
+            continue;
+        }
 
-        if (isPaintLayer(layer)) {
-            // Paint layer: direct blend of hand-drawn flow, with optional blur
-            const canvas = canvasMap.get(layer.id);
-            if (!canvas) return;
-            flowCtx.save();
-            flowCtx.globalAlpha = opacity;
-            if (layer.blur > 0) {
-                drawBlurred(flowCtx, canvas, layer.blur);
-            } else {
-                flowCtx.drawImage(canvas, 0, 0);
-            }
-            flowCtx.restore();
+        const dst = getSlot(i);
+        const dctx = dst.getContext('2d');
+        if (!dctx) continue;
+        dctx.globalCompositeOperation = 'source-over';
+        dctx.globalAlpha = 1;
+        dctx.filter = 'none';
+        dctx.clearRect(0, 0, SIZE, SIZE);
+        if (prevCanvas) dctx.drawImage(prevCanvas, 0, 0);
+        else { dctx.fillStyle = 'rgb(128, 128, 255)'; dctx.fillRect(0, 0, SIZE, SIZE); }
 
-        } else if (isWindLayer(layer)) {
-            // Wind adjustment layer: generate wind data, apply with mask
-            let windCanvas = canvasMap.get(layer.id);
-            if (!windCanvas) { windCanvas = initCanvas(); canvasMap.set(layer.id, windCanvas); }
-            generateWindData(windCanvas, layer.direction, layer.strength);
-            
-            const maskCanvas = layer.hasMask ? maskMap.get(layer.id) : null;
-            
-            if (maskCanvas) {
-                // Apply wind only where mask is white
-                // Use a temp canvas: draw wind, then source-in with mask
-                let helper = blurHelperRef.current;
-                if (!helper) { helper = initCanvas(); blurHelperRef.current = helper; }
-                const hCtx = helper.getContext('2d');
-                if (hCtx) {
-                    hCtx.clearRect(0, 0, SIZE, SIZE);
-                    hCtx.drawImage(windCanvas, 0, 0);
-                    hCtx.globalCompositeOperation = 'destination-in';
-                    hCtx.drawImage(maskCanvas, 0, 0);
-                    hCtx.globalCompositeOperation = 'source-over';
-                    flowCtx.save();
-                    flowCtx.globalAlpha = opacity;
-                    flowCtx.drawImage(helper, 0, 0);
-                    flowCtx.restore();
+        if (layer.visible) {
+            const opacity = layer.opacity ?? 1;
+
+            if (isPaintLayer(layer)) {
+                const canvas = canvasMap.get(layer.id);
+                if (canvas) {
+                    dctx.save();
+                    dctx.globalAlpha = opacity;
+                    if (layer.blur > 0) drawBlurred(dctx, canvas, layer.blur);
+                    else dctx.drawImage(canvas, 0, 0);
+                    dctx.restore();
                 }
-            } else {
-                // No mask: apply wind everywhere
-                flowCtx.save();
-                flowCtx.globalAlpha = opacity;
-                flowCtx.drawImage(windCanvas, 0, 0);
-                flowCtx.restore();
-            }
 
-        } else if (isObstacleLayer(layer)) {
-            // Obstacle adjustment layer: mask defines obstacle shape
-            const maskCanvas = layer.hasMask ? maskMap.get(layer.id) : null;
-            if (!maskCanvas) return; // No mask = no obstacle
+            } else if (isWindLayer(layer)) {
+                let windCanvas = canvasMap.get(layer.id);
+                if (!windCanvas) { windCanvas = initCanvas(); canvasMap.set(layer.id, windCanvas); }
+                generateWindData(windCanvas, layer.direction, layer.strength);
 
-            hasObstacles = true;
-            
-            // Collect for combined obstacle (for B-channel)
-            if (!combinedObstacle) {
-                combinedObstacle = initCanvas();
-                combinedObstacleCtx = combinedObstacle.getContext('2d');
-                if (combinedObstacleCtx) combinedObstacleCtx.clearRect(0, 0, SIZE, SIZE);
-            }
-            if (combinedObstacleCtx) {
-                combinedObstacleCtx.save();
-                combinedObstacleCtx.globalAlpha = opacity;
-                combinedObstacleCtx.drawImage(maskCanvas, 0, 0);
-                combinedObstacleCtx.restore();
-            }
+                // A mask counts as painted as soon as anything was drawn into it,
+                // even if the layer flag hasn't been flipped yet.
+                const maskVer = contentVersionRef.current.get(`mask:${layer.id}`) ?? 0;
+                const maskCanvas = maskVer > 0 ? maskMap.get(layer.id) : null;
 
-            // Apply disturbance
-            if (layer.disturbanceEnabled && layer.disturbance > 0) {
-                applyDisturbance(flowCtx, maskCanvas, layer.disturbance);
-            }
+                if (maskCanvas) {
+                    let helper = blurHelperRef.current;
+                    if (!helper) { helper = initCanvas(); blurHelperRef.current = helper; }
+                    const hCtx = helper.getContext('2d');
+                    if (hCtx) {
+                        hCtx.clearRect(0, 0, SIZE, SIZE);
+                        hCtx.drawImage(windCanvas, 0, 0);
+                        hCtx.globalCompositeOperation = 'destination-in';
+                        hCtx.drawImage(maskCanvas, 0, 0);
+                        hCtx.globalCompositeOperation = 'source-over';
+                        dctx.save();
+                        dctx.globalAlpha = opacity;
+                        dctx.drawImage(helper, 0, 0);
+                        dctx.restore();
+                    }
+                } else {
+                    dctx.save();
+                    dctx.globalAlpha = opacity;
+                    dctx.drawImage(windCanvas, 0, 0);
+                    dctx.restore();
+                }
 
-            // Draw neutral flow color where obstacle exists
-            let helper = blurHelperRef.current;
-            if (!helper) { helper = initCanvas(); blurHelperRef.current = helper; }
-            const hCtx = helper.getContext('2d');
-            if (hCtx) {
-                hCtx.clearRect(0, 0, SIZE, SIZE);
-                hCtx.fillStyle = 'rgb(128, 128, 255)';
-                hCtx.fillRect(0, 0, SIZE, SIZE);
-                hCtx.globalCompositeOperation = 'destination-in';
-                hCtx.drawImage(maskCanvas, 0, 0);
-                hCtx.globalCompositeOperation = 'source-over';
-                flowCtx.save();
-                flowCtx.globalAlpha = opacity;
-                flowCtx.drawImage(helper, 0, 0);
-                flowCtx.restore();
+            } else if (isObstacleLayer(layer)) {
+                const maskVer = contentVersionRef.current.get(`mask:${layer.id}`) ?? 0;
+                const maskCanvas = maskVer > 0 ? maskMap.get(layer.id) : null;
+                if (maskCanvas) {
+                    if (layer.disturbanceEnabled && layer.disturbance > 0) {
+                        applyDisturbance(dctx, maskCanvas, layer.disturbance);
+                    }
+                    let helper = blurHelperRef.current;
+                    if (!helper) { helper = initCanvas(); blurHelperRef.current = helper; }
+                    const hCtx = helper.getContext('2d');
+                    if (hCtx) {
+                        hCtx.clearRect(0, 0, SIZE, SIZE);
+                        hCtx.fillStyle = 'rgb(128, 128, 255)';
+                        hCtx.fillRect(0, 0, SIZE, SIZE);
+                        hCtx.globalCompositeOperation = 'destination-in';
+                        hCtx.drawImage(maskCanvas, 0, 0);
+                        hCtx.globalCompositeOperation = 'source-over';
+                        dctx.save();
+                        dctx.globalAlpha = opacity;
+                        dctx.drawImage(helper, 0, 0);
+                        dctx.restore();
+                    }
+                }
             }
         }
-    });
 
-    // Post-processing: B-channel for obstacles
-    if (hasObstacles && combinedObstacle && combinedObstacleCtx) {
-        const obsData = combinedObstacleCtx.getImageData(0, 0, SIZE, SIZE);
-        const fData = flowCtx.getImageData(0, 0, SIZE, SIZE);
-        const od = obsData.data, fd = fData.data;
-        for (let i = 0; i < od.length; i += 4) {
-            const obsAlpha = od[i + 3];
-            if (obsAlpha > 0) {
-                fd[i + 2] = Math.round(255 * (1 - obsAlpha / 255));
-            }
-        }
-        flowCtx.putImageData(fData, 0, 0);
+        compositeCacheRef.current[i] = dst;
+        compositeKeyRef.current[i] = sig;
+        prevCanvas = dst;
+        prevKey = sig;
     }
 
-    onTextureUpdate(flowMapRef.current);
-    drawArrows();
-    ctx.drawImage(flowMapRef.current, 0, 0);
-    renderPendingRef.current = false;
-  }, [onTextureUpdate, drawArrows, layers, drawBlurred, generateWindData, applyDisturbance]);
+    // Obstacle masks drive the B channel (mobility). They are independent of the
+    // compositing chain, so they get their own cache key.
+    const obstacleLayers = layers.filter(l =>
+        l.visible && isObstacleLayer(l) && (contentVersionRef.current.get(`mask:${l.id}`) ?? 0) > 0);
+    const hasObstacles = obstacleLayers.length > 0;
+    const obsKey = obstacleLayers.map(l =>
+        `${l.id}:${contentVersionRef.current.get(`mask:${l.id}`)}:${l.opacity.toFixed(3)}`).join(',');
+
+    const finalKey = `${prevKey}|B:${hasObstacles ? obsKey : ''}`;
+    let finalCanvas = finalCanvasRef.current;
+    if (!finalCanvas) {
+        finalCanvas = document.createElement('canvas');
+        finalCanvas.width = SIZE; finalCanvas.height = SIZE;
+        finalCanvasRef.current = finalCanvas;
+    }
+
+    if (finalKeyRef.current !== finalKey) {
+        const fCtx = finalCanvas.getContext('2d');
+        if (!fCtx) return;
+        fCtx.globalCompositeOperation = 'source-over';
+        fCtx.globalAlpha = 1;
+        fCtx.filter = 'none';
+        fCtx.clearRect(0, 0, SIZE, SIZE);
+        if (prevCanvas) fCtx.drawImage(prevCanvas, 0, 0);
+        else { fCtx.fillStyle = 'rgb(128, 128, 255)'; fCtx.fillRect(0, 0, SIZE, SIZE); }
+
+        if (hasObstacles) {
+            let obs = combinedObstacleRef.current;
+            if (!obs) {
+                obs = document.createElement('canvas');
+                obs.width = SIZE; obs.height = SIZE;
+                combinedObstacleRef.current = obs;
+            }
+            if (combinedObstacleKeyRef.current !== obsKey) {
+                const oCtx = obs.getContext('2d');
+                if (oCtx) {
+                    oCtx.clearRect(0, 0, SIZE, SIZE);
+                    obstacleLayers.forEach(l => {
+                        const m = maskMap.get(l.id);
+                        if (!m) return;
+                        oCtx.save();
+                        oCtx.globalAlpha = l.opacity;
+                        oCtx.drawImage(m, 0, 0);
+                        oCtx.restore();
+                    });
+                    combinedObstacleKeyRef.current = obsKey;
+                }
+            }
+            const oCtx = obs.getContext('2d', { willReadFrequently: true });
+            if (oCtx) {
+                const od = oCtx.getImageData(0, 0, SIZE, SIZE).data;
+                const fd = fCtx.getImageData(0, 0, SIZE, SIZE);
+                const d = fd.data;
+                for (let i = 0; i < od.length; i += 4) {
+                    const a = od[i + 3];
+                    if (a > 0) d[i + 2] = 255 - a;
+                }
+                fCtx.putImageData(fd, 0, 0);
+            }
+        }
+        finalKeyRef.current = finalKey;
+    }
+
+    flowMapRef.current = finalCanvas;
+    ctx.drawImage(finalCanvas, 0, 0);
+    onTextureUpdate(finalCanvas);
+    drawArrows(finalKey);
+  }, [onTextureUpdate, drawArrows, layers, drawBlurred, generateWindData, applyDisturbance, getCachedCtx]);
 
   const renderComposite = useCallback(() => {
     if (renderPendingRef.current) return;
@@ -479,28 +638,36 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
       const activeIds = new Set(layers.map(l => l.id));
       for (const id of map.keys()) { if (!activeIds.has(id)) map.delete(id); }
       for (const id of masks.keys()) { if (!activeIds.has(id)) masks.delete(id); }
+      if (compositeCacheRef.current.length > layers.length) {
+          compositeCacheRef.current.length = layers.length;
+          compositeKeyRef.current.length = layers.length;
+      }
       renderComposite();
   }, [layers, renderComposite]);
 
   // History
+  // Only the active layer can change between two snapshots. Storing every layer
+  // cost ~4MB per layer per step, which adds up to hundreds of MB in no time.
   const saveHistory = useCallback(() => {
     const snapshot = new Map<string, ImageData>();
-    layerCanvasesRef.current.forEach((canvas, id) => {
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const id = activeLayerId;
+    const content = layerCanvasesRef.current.get(id);
+    if (content) {
+        const ctx = content.getContext('2d');
         if (ctx) snapshot.set(id, ctx.getImageData(0, 0, SIZE, SIZE));
-    });
-    // Also save masks
-    maskCanvasesRef.current.forEach((canvas, id) => {
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    }
+    const mask = maskCanvasesRef.current.get(id);
+    if (mask) {
+        const ctx = mask.getContext('2d');
         if (ctx) snapshot.set(`mask:${id}`, ctx.getImageData(0, 0, SIZE, SIZE));
-    });
+    }
     if (historyIndexRef.current < historyRef.current.length - 1) {
         historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
     }
     historyRef.current.push(snapshot);
     historyIndexRef.current++;
     if (historyRef.current.length > 20) { historyRef.current.shift(); historyIndexRef.current--; }
-  }, []);
+  }, [activeLayerId]);
 
   const loadHistory = useCallback((index: number) => {
     const state = historyRef.current[index];
@@ -514,22 +681,29 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
             const canvas = layerCanvasesRef.current.get(id);
             if (canvas) canvas.getContext('2d')?.putImageData(data, 0, 0);
         }
+        bumpContentVersion(id);
     });
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
-  }, [renderComposite, onPaintingComplete]);
+  }, [renderComposite, onPaintingComplete, bumpContentVersion]);
 
   const undo = useCallback(() => { if (historyIndexRef.current > 0) { historyIndexRef.current--; loadHistory(historyIndexRef.current); } }, [loadHistory]);
   const redo = useCallback(() => { if (historyIndexRef.current < historyRef.current.length - 1) { historyIndexRef.current++; loadHistory(historyIndexRef.current); } }, [loadHistory]);
 
   const clearLayer = useCallback((id: string) => {
       const canvas = layerCanvasesRef.current.get(id);
-      if (canvas) { const ctx = canvas.getContext('2d'); if (ctx) ctx.clearRect(0, 0, SIZE, SIZE); }
+      if (canvas) {
+          const ctx = canvas.getContext('2d');
+          if (ctx) { ctx.clearRect(0, 0, SIZE, SIZE); bumpContentVersion(id); }
+      }
       const mask = maskCanvasesRef.current.get(id);
-      if (mask) { const ctx = mask.getContext('2d'); if (ctx) { ctx.fillStyle = 'white'; ctx.fillRect(0, 0, SIZE, SIZE); } }
+      if (mask) {
+          const ctx = mask.getContext('2d');
+          if (ctx) { ctx.fillStyle = 'white'; ctx.fillRect(0, 0, SIZE, SIZE); bumpContentVersion(`mask:${id}`); }
+      }
       renderComposite(); saveHistory();
       if (onPaintingComplete) onPaintingComplete();
-  }, [renderComposite, saveHistory, onPaintingComplete]);
+  }, [renderComposite, saveHistory, onPaintingComplete, bumpContentVersion]);
 
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
@@ -708,13 +882,11 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         }
     }
     
-    // If we painted a mask, mark layer as having mask
-    if (isMaskPaint && activeLayer && isAdjustmentLayer(activeLayer) && !(activeLayer as any).hasMask) {
-        // This is a side effect but necessary to sync state
-    }
-    
+    // Drop the cached composite for whichever buffer was just painted
+    bumpContentVersion(isMaskPaint ? `mask:${activeLayerId}` : activeLayerId);
+
     renderComposite();
-  }, [activeTool, brushSettings, drawStamp, renderComposite, projectionType, activeLayerId, layers, editTarget, getTargetCanvas]);
+  }, [activeTool, brushSettings, drawStamp, renderComposite, projectionType, activeLayerId, layers, editTarget, getTargetCanvas, bumpContentVersion]);
 
   const floodFill = useCallback((u: number, v: number, threshold: number) => {
     const targetCanvas = getTargetCanvas();
@@ -760,9 +932,10 @@ const FlowPainter = forwardRef<FlowPainterHandle, FlowPainterProps>(({
         }
     }
     targetCtx.putImageData(targetData, 0, 0);
+    bumpContentVersion(isMaskPaint ? `mask:${activeLayerId}` : activeLayerId);
     renderComposite();
     if (onPaintingComplete) onPaintingComplete();
-  }, [renderComposite, onPaintingComplete, projectionType, activeLayerId, layers, editTarget, getTargetCanvas]);
+  }, [renderComposite, onPaintingComplete, projectionType, activeLayerId, layers, editTarget, getTargetCanvas, bumpContentVersion]);
 
   useEffect(() => {
       if (historyRef.current.length === 0 && layerCanvasesRef.current.size > 0) saveHistory();

@@ -52,6 +52,11 @@ export const isObstacleLayer = (layer: Layer): layer is ObstacleLayer => layer.t
 export const isAdjustmentLayer = (layer: Layer): layer is WindLayer | ObstacleLayer =>
     layer.type === 'wind' || layer.type === 'obstacle';
 
+// Partial updates for a layer. Must stay a union of the concrete layer types —
+// `Partial<Layer>` would distribute into a union whose members spread into an
+// object that is no longer assignable to `Layer`.
+export type LayerUpdate = Partial<PaintLayer> | Partial<WindLayer> | Partial<ObstacleLayer>;
+
 export type ProjectionType = 'equirectangular' | 'polar' | 'planar';
 
 // What the user is currently editing on an adjustment layer

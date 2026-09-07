@@ -26,7 +26,7 @@
   import PreviewScene from './components/PreviewScene';
   import { 
     BrushSettings, ViewMode, ActiveTool, FlowPainterHandle, ProjectionType, 
-    Layer, PaintLayer, WindLayer, ObstacleLayer,
+    Layer, LayerUpdate, PaintLayer, WindLayer, ObstacleLayer,
     isPaintLayer, isWindLayer, isObstacleLayer, isAdjustmentLayer,
     EditTarget
   } from './types';
@@ -70,7 +70,7 @@
       editTarget: EditTarget,
       setActiveLayerId: (id: string) => void,
       setEditTarget: (target: EditTarget) => void,
-      updateLayer: (id: string, updates: Partial<Layer>) => void,
+      updateLayer: (id: string, updates: LayerUpdate) => void,
       removeLayer: (id: string) => void
   }) => {
       const {
@@ -150,7 +150,7 @@
                                   onClick={(e) => { 
                                       e.stopPropagation(); 
                                       setEditTarget('mask'); 
-                                      updateLayer(layer.id, { hasMask: true } as any);
+                                      updateLayer(layer.id, { hasMask: true });
                                   }}
                                   className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition-colors ${editTarget === 'mask' ? 'bg-white/10 text-white' : 'text-slate-500 hover:text-slate-400'}`}
                                   title="编辑遮罩"
@@ -178,7 +178,7 @@
       updateLayer 
   }: { 
       layer: Layer, 
-      updateLayer: (id: string, updates: Partial<Layer>) => void 
+      updateLayer: (id: string, updates: LayerUpdate) => void 
   }) => {
       const config = LAYER_TYPE_CONFIG[layer.type];
 
@@ -198,7 +198,7 @@
                       <div className="flex items-center gap-3">
                           <span className="text-[10px] text-slate-500 font-bold uppercase w-10">方向</span>
                           <input type="range" min="0" max="360" value={layer.direction}
-                              onChange={(e) => updateLayer(layer.id, { direction: Number(e.target.value) } as Partial<WindLayer>)}
+                              onChange={(e) => updateLayer(layer.id, { direction: Number(e.target.value) })}
                               className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-violet-500"
                               onPointerDown={(e) => e.stopPropagation()} />
                           <span className="text-[10px] font-mono text-violet-400 w-8 text-right">{layer.direction}°</span>
@@ -206,7 +206,7 @@
                       <div className="flex items-center gap-3">
                           <span className="text-[10px] text-slate-500 font-bold uppercase w-10">强度</span>
                           <input type="range" min="0" max="1" step="0.01" value={layer.strength}
-                              onChange={(e) => updateLayer(layer.id, { strength: Number(e.target.value) } as Partial<WindLayer>)}
+                              onChange={(e) => updateLayer(layer.id, { strength: Number(e.target.value) })}
                               className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-violet-500"
                               onPointerDown={(e) => e.stopPropagation()} />
                           <span className="text-[10px] font-mono text-violet-400 w-8 text-right">{Math.round(layer.strength * 100)}%</span>
@@ -219,7 +219,7 @@
                   <>
                       <div className="flex items-center gap-3">
                           <span className="text-[10px] text-slate-500 font-bold uppercase w-10">扰动</span>
-                          <button onClick={() => updateLayer(layer.id, { disturbanceEnabled: !layer.disturbanceEnabled } as Partial<ObstacleLayer>)}
+                          <button onClick={() => updateLayer(layer.id, { disturbanceEnabled: !layer.disturbanceEnabled })}
                               className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors ${
                                   layer.disturbanceEnabled ? 'bg-rose-500/20 text-rose-400' : 'bg-[#2d2d33] text-slate-500'
                               }`}>
@@ -230,7 +230,7 @@
                           <div className="flex items-center gap-3">
                               <span className="text-[10px] text-slate-500 font-bold uppercase w-10">范围</span>
                               <input type="range" min="0" max="1" step="0.05" value={layer.disturbance}
-                                  onChange={(e) => updateLayer(layer.id, { disturbance: Number(e.target.value) } as Partial<ObstacleLayer>)}
+                                  onChange={(e) => updateLayer(layer.id, { disturbance: Number(e.target.value) })}
                                   className="flex-1 h-1 bg-[#323238] rounded-lg appearance-none cursor-pointer accent-rose-500"
                                   onPointerDown={(e) => e.stopPropagation()} />
                               <span className="text-[10px] font-mono text-rose-400 w-8 text-right">{Math.round(layer.disturbance * 100)}%</span>
@@ -289,14 +289,18 @@
     const [activeLayerId, setActiveLayerId] = useState('layer-1');
     const [editTarget, setEditTarget] = useState<EditTarget>('content');
 
-    // Shared Cursor State
-    const [sharedCursorUV, setSharedCursorUV] = useState<{u: number, v: number} | null>(null);
+    // Cursor and texture version are refs, not state: they change on every
+    // pointer move, and pushing them through React re-rendered the whole app
+    // (3D scene included) dozens of times per second.
+    const sharedCursorUVRef = useRef<{u: number, v: number} | null>(null);
+    const flowVersionRef = useRef(0);
+
+    const handleCursorUpdate = useCallback((uv: {u: number, v: number} | null) => {
+        sharedCursorUVRef.current = uv;
+    }, []);
 
     // Magic Wand Settings
     const [magicWandThreshold, setMagicWandThreshold] = useState(20);
-    
-    // Versioning
-    const [flowVersion, setFlowVersion] = useState(0);
 
     // Export Settings
     const [invertX, setInvertX] = useState(false);
@@ -322,7 +326,7 @@
 
     // Callback when FlowPainter finishes expensive operations
     const handlePaintingComplete = useCallback(() => {
-        setFlowVersion(prev => prev + 1);
+        flowVersionRef.current++;
     }, []);
 
     // Bridge for 3D painting
@@ -366,7 +370,7 @@
 
     const handleTextureUpdate = useCallback((canvas: HTMLCanvasElement) => {
       setFlowCanvas(prev => prev === canvas ? prev : canvas); 
-      setFlowVersion(v => v + 1);
+      flowVersionRef.current++;
     }, []);
 
     const handleExport = () => {
@@ -436,8 +440,8 @@
         flowPainterRef.current?.clearLayer(id);
     };
 
-    const updateLayer = (id: string, updates: Partial<Layer>) => {
-        setLayers(prev => prev.map(l => l.id === id ? { ...l, ...updates } : l));
+    const updateLayer = (id: string, updates: LayerUpdate) => {
+        setLayers(prev => prev.map(l => l.id === id ? { ...l, ...updates } as Layer : l));
     };
 
     // Focus container on mount
@@ -822,8 +826,7 @@
                   onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
                   projectionType={projectionType}
                   polarAngle={polarAngle}
-                  cursorUV={sharedCursorUV}
-                  onCursorUpdate={setSharedCursorUV}
+                  onCursorUpdate={handleCursorUpdate}
                   showArrows={showArrows}
                   arrowDensity={arrowDensity}
                 />
@@ -843,7 +846,7 @@
                   brushSettings={brushSettings}
                   isPaintMode={showArrows}
                   activeTool={activeTool}
-                  flowVersion={flowVersion}
+                  flowVersionRef={flowVersionRef}
                   onPaint={handle3DPaint}
                   onPaintEnd={handle3DPaintEnd}
                   projectionType={projectionType}
@@ -852,8 +855,8 @@
                   showFlowMap={showFlowMap}
                   flowMapOpacity={flowMapOpacity}
                   onSetBrushSize={(size) => setBrushSettings(prev => ({ ...prev, size }))}
-                  cursorUV={sharedCursorUV}
-                  onCursorUpdate={setSharedCursorUV}
+                  cursorUVRef={sharedCursorUVRef}
+                  onCursorUpdate={handleCursorUpdate}
                 />
               </div>
             </div>

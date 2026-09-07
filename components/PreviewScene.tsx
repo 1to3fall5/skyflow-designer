@@ -36,7 +36,8 @@ interface SceneContentProps {
   brushSettings: BrushSettings;
   isPaintMode: boolean;
   activeTool: ActiveTool;
-  flowVersion: number;
+  // Refs, not state: these change every frame and must not re-render the scene.
+  flowVersionRef: React.MutableRefObject<number>;
   onPaint: (u: number, v: number, lu: number, lv: number) => void;
   onPaintEnd?: () => void;
   projectionType: ProjectionType;
@@ -44,7 +45,7 @@ interface SceneContentProps {
   showFlowMap: boolean;
   flowMapOpacity?: number;
   arrowDensity: number;
-  cursorUV?: {u: number, v: number} | null;
+  cursorUVRef: React.MutableRefObject<{u: number, v: number} | null>;
   onCursorUpdate?: (uv: {u: number, v: number} | null) => void;
 }
 
@@ -56,7 +57,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
   brushSettings,
   isPaintMode,
   activeTool,
-  flowVersion,
+  flowVersionRef,
   onPaint,
   onPaintEnd,
   projectionType,
@@ -64,14 +65,14 @@ const SceneContent: React.FC<SceneContentProps> = ({
   showFlowMap,
   flowMapOpacity = 0.6,
   arrowDensity,
-  cursorUV: cursorUVProp,
+  cursorUVRef,
   onCursorUpdate
 }) => {
   const materialRef = useRef<THREE.ShaderMaterial>(null);
   const arrowMaterialRef = useRef<THREE.ShaderMaterial>(null);
   const textureLoader = useMemo(() => new THREE.TextureLoader(), []);
   const { gl } = useThree();
-  const prevVersion = useRef(flowVersion);
+  const prevVersion = useRef(flowVersionRef.current);
   
   // Update cursor style
   useEffect(() => {
@@ -84,7 +85,9 @@ const SceneContent: React.FC<SceneContentProps> = ({
   
   // Cursor State
   const cursorUV = useRef<THREE.Vector2>(new THREE.Vector2(0, 0));
-  const [showCursor, setShowCursor] = useState(false);
+  // Hover is tracked in a ref: the cursor moves every frame, and re-rendering
+  // the scene tree for it was pure overhead.
+  const localHover = useRef(false);
   
   // Plane Aspect Ratio
   const [planeAspect, setPlaneAspect] = useState(2.0);
@@ -126,15 +129,18 @@ const SceneContent: React.FC<SceneContentProps> = ({
   useFrame((state) => {
     if (materialRef.current) {
       materialRef.current.uniforms.uTime.value = state.clock.elapsedTime;
-      
-      // Update cursor position every frame for smoothness
-      materialRef.current.uniforms.uCursor.value.copy(cursorUV.current);
 
-      const shouldUpdate = flowVersion !== prevVersion.current || isDragging.current;
+      // The 2D view's cursor takes precedence; otherwise fall back to our own.
+      const ext = cursorUVRef.current;
+      if (ext) cursorUV.current.set(ext.u, 1 - ext.v);
+      materialRef.current.uniforms.uCursor.value.copy(cursorUV.current);
+      materialRef.current.uniforms.uShowCursor.value = (ext || localHover.current) ? 1.0 : 0.0;
+
+      const shouldUpdate = flowVersionRef.current !== prevVersion.current || isDragging.current;
       
       if (shouldUpdate) {
-         if (flowVersion !== prevVersion.current) {
-             prevVersion.current = flowVersion;
+         if (flowVersionRef.current !== prevVersion.current) {
+             prevVersion.current = flowVersionRef.current;
          }
          materialRef.current.uniforms.uFlowMap.value.needsUpdate = true;
       }
@@ -154,7 +160,6 @@ const SceneContent: React.FC<SceneContentProps> = ({
     if (materialRef.current) {
       const uvRadius = (brushSettings.size / 2.0) / 1024.0;
       materialRef.current.uniforms.uBrushSize.value = uvRadius;
-      materialRef.current.uniforms.uShowCursor.value = showCursor ? 1.0 : 0.0;
       materialRef.current.uniforms.uProjectionType.value = projectionType === 'polar' ? 1.0 : (projectionType === 'planar' ? 2.0 : 0.0);
       materialRef.current.uniforms.uPolarAngle.value = THREE.MathUtils.degToRad(polarAngle);
       materialRef.current.uniforms.uShowFlowMap.value = showFlowMap ? 1.0 : 0.0;
@@ -171,7 +176,7 @@ const SceneContent: React.FC<SceneContentProps> = ({
 
       arrowMaterialRef.current.uniformsNeedUpdate = true;
     }
-  }, [brushSettings.size, showCursor, projectionType, polarAngle, showFlowMap, flowMapOpacity, arrowDensity, planeAspect]);
+  }, [brushSettings.size, projectionType, polarAngle, showFlowMap, flowMapOpacity, arrowDensity, planeAspect]);
 
   // Special handling for cursor UV as it changes on mouse move but doesn't need a full uniform update loop if not painting
   // However, cursor is tracked via ref cursorUV.current and updated in useFrame normally.
@@ -243,23 +248,8 @@ const SceneContent: React.FC<SceneContentProps> = ({
     }
   }, [speed, distortion, flowTexture]);
 
-  // Sync cursor from external source
-  useEffect(() => {
-    if (cursorUVProp) {
-        // Convert from Canvas UV (0,0 top-left) to Shader UV (0,0 bottom-left)
-        const shaderUV = new THREE.Vector2(cursorUVProp.u, 1 - cursorUVProp.v);
-        cursorUV.current.copy(shaderUV);
-        if (!showCursor) setShowCursor(true);
-    } else {
-        // If external cursor is null, we might want to hide, but ONLY if we are not interacting locally.
-        // However, if we interact locally, we emit non-null.
-        // If we leave locally, we emit null.
-        // So if prop is null, it means NO ONE is pointing.
-        if (showCursor) setShowCursor(false);
-    }
-  }, [cursorUVProp]);
-
   // --- Interaction Handlers ---
+  // (Cursor is now read straight from cursorUVRef inside useFrame.)
 
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
     if (e.button !== 0) return;
@@ -309,14 +299,14 @@ const SceneContent: React.FC<SceneContentProps> = ({
     // Only hide if we don't have an external cursor
     // Actually, if we leave, we signal null to external.
     onCursorUpdate?.(null);
-    if (!cursorUVProp) setShowCursor(false);
+    localHover.current = false;
   };
 
   const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (e.uv) {
         const transformed = getTransformedUV(e.uv);
         cursorUV.current.copy(transformed);
-        if (!showCursor) setShowCursor(true);
+        localHover.current = true;
         
         // Emit cursor update (convert to Canvas UV: 0,0 at top-left)
         onCursorUpdate?.({
@@ -629,9 +619,8 @@ const UEControls = ({
   return null;
 };
 
-interface PreviewSceneProps extends Omit<SceneContentProps, 'flowVersion' | 'polarAngle' | 'showFlowMap' | 'arrowDensity'> {
+interface PreviewSceneProps extends Omit<SceneContentProps, 'polarAngle' | 'showFlowMap' | 'arrowDensity'> {
   className?: string;
-  flowVersion?: number;
   polarAngle?: number;
   showFlowMap?: boolean;
   flowMapOpacity?: number;
@@ -671,12 +660,10 @@ const PreviewScene: React.FC<PreviewSceneProps> = (props) => {
         <ambientLight intensity={0.5} />
         <SceneContent 
           {...props} 
-          flowVersion={props.flowVersion || 0} 
           polarAngle={props.polarAngle || 90} 
           showFlowMap={props.showFlowMap || false}
           flowMapOpacity={props.flowMapOpacity}
           arrowDensity={props.arrowDensity || 64}
-          cursorUV={props.cursorUV}
           onCursorUpdate={props.onCursorUpdate}
         />
         <UEControls 
