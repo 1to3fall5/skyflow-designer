@@ -84,7 +84,7 @@ SkyFlow Designer 是一款基于 Web 的专业工具，用于创建动态天空�
 
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/1to3fall5.git
+   git clone https://github.com/1to3fall5/skyflow-designer.git
    ```
 
 2. 安装依赖：
@@ -97,7 +97,7 @@ SkyFlow Designer 是一款基于 Web 的专业工具，用于创建动态天空�
    npm run dev
    ```
 
-4. 在浏览器中访问 `http://localhost:5173`。
+4. 在浏览器中访问 `http://localhost:5173/skyflow-designer/`。
 
 ## 部署
 
