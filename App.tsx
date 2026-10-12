@@ -24,6 +24,7 @@
   } from 'lucide-react';
   import FlowPainter from './components/FlowPainter';
   import PreviewScene from './components/PreviewScene';
+  import { decodeTgaToUrl, encodeCanvasToTga } from './tgaCodec';
   import { 
     BrushSettings, ViewMode, ActiveTool, FlowPainterHandle, ProjectionType, 
     Layer, LayerUpdate, PaintLayer, WindLayer, ObstacleLayer,
@@ -305,6 +306,7 @@
     // Export Settings
     const [invertX, setInvertX] = useState(false);
     const [invertY, setInvertY] = useState(true);
+    const [exportFormat, setExportFormat] = useState<'png' | 'tga'>('png');
 
     const [skyTextureUrl, setSkyTextureUrl] = useState<string | null>(null);
     const [flowCanvas, setFlowCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -390,15 +392,34 @@
           }
           ctx.putImageData(imageData, 0, 0);
       }
+      const suffix = `flowmap_x${invertX ? 'inv' : ''}_y${invertY ? 'inv' : ''}`;
       const link = document.createElement('a');
-      link.download = `flowmap_x${invertX?'inv':''}_y${invertY?'inv':''}.png`;
+
+      if (exportFormat === 'tga') {
+          const url = URL.createObjectURL(encodeCanvasToTga(exportCanvas));
+          link.href = url;
+          link.download = `${suffix}.tga`;
+          link.click();
+          // let the download start before releasing the blob
+          setTimeout(() => URL.revokeObjectURL(url), 30000);
+          return;
+      }
+
       link.href = exportCanvas.toDataURL('image/png');
+      link.download = `${suffix}.png`;
       link.click();
     };
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) setSkyTextureUrl(URL.createObjectURL(file));
+      if (!file) return;
+      if (/\.tga$/i.test(file.name)) {
+        decodeTgaToUrl(file)
+          .then(setSkyTextureUrl)
+          .catch(err => alert(`TGA 解码失败：${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
+      setSkyTextureUrl(URL.createObjectURL(file));
     };
 
     // Layer Management
@@ -589,6 +610,15 @@
                   </label>
                 ))}
               </div>
+              <div className="flex p-0.5 gap-0.5 bg-[#141416] rounded-lg border border-[#2d2d33]">
+                {(['png', 'tga'] as const).map(fmt => (
+                  <button key={fmt} onClick={() => setExportFormat(fmt)}
+                    className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase transition-all ${
+                      exportFormat === fmt ? 'bg-[#2d2d33] text-white' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                  >{fmt}</button>
+                ))}
+              </div>
               <button onClick={handleExport}
                 className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-lg shadow-indigo-600/20 active:scale-95"
               >
@@ -609,7 +639,7 @@
                 图片源
               </h2>
               <div className="relative group">
-                <input type="file" accept="image/*" onChange={handleFileUpload}
+                <input type="file" accept="image/*,.tga" onChange={handleFileUpload}
                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" />
                 <div className="w-full aspect-[2/1] bg-[#212124] hover:bg-[#252529] text-slate-400 rounded-xl border-2 border-dashed border-[#323238] group-hover:border-indigo-500/50 transition-all flex flex-col items-center justify-center gap-2">
                   <ImageIcon className="w-5 h-5 text-slate-500 group-hover:text-indigo-400" />
