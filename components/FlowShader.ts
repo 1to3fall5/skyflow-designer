@@ -111,14 +111,27 @@ export const FlowShaderMaterial = {
       // Final color
       vec4 finalColor = mix(col1, col2, mixFactor);
       
-      // Masking for Polar: Black out everything outside the valid radius
+      // --- Polar: outside the mapped disc there is no sky data. ---
+      // Render that region as a soft ground gradient instead of hard black, so
+      // the bottom half reads as terrain and you can still look all the way
+      // around the sphere.
+      bool isBelowHorizon = false;
       if (abs(uProjectionType - 1.0) < 0.1) {
           float dist = distance(baseUV, vec2(0.5));
-          if (dist > 0.5) finalColor = vec4(0.0, 0.0, 0.0, 1.0);
+          if (dist > 0.5) {
+              isBelowHorizon = true;
+              // 0 at the horizon, 1 at the nadir
+              float depth = clamp((dist - 0.5) / 0.5, 0.0, 1.0);
+              vec3 ground = mix(vec3(0.10, 0.105, 0.125), vec3(0.035, 0.04, 0.05), depth);
+              // Soften the seam right at the horizon
+              finalColor.rgb = mix(finalColor.rgb, ground, smoothstep(0.0, 0.02, dist - 0.5));
+          }
       }
       
       // --- Flow Map Overlay ---
-      if (uShowFlowMap > 0.5) {
+      // Skipped below the horizon: the flow map is neutral (128,128,255) there,
+      // which would tint the ground solid blue.
+      if (uShowFlowMap > 0.5 && !isBelowHorizon) {
           // Show the flow map colors (0..1) directly
           // R = Flow X, G = Flow Y, B = 0, A = 1
           vec4 overlayColor = vec4(flowColor.rgb, 1.0);
